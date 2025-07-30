@@ -115,3 +115,11 @@ include "dev/i2c/files.i2c"
 
 # Include USB stuff
 include "dev/usb/files.usb"
+
+#
+# VMM
+#
+device	vmm {}
+attach	vmm at mainbus
+file	dev/vmm/vmm.c				vmm		needs-flag
+file	arch/powerpc64/powerpc64/vmm_machdep.c	vmm		needs-flag

@@ -196,3 +196,5 @@ brgphy*		at mii?			# Broadcom Gigabit PHYs
 pseudo-device	openprom
 pseudo-device	dt
 pseudo-device	wsmux 2
+
+vmm0	at mainbus0

@@ -105,6 +105,16 @@ cdev_decl(lpt);
 cdev_decl(pci);
 #endif
 
+#include "vmm.h"
+
+#define cdev_vmm_init(c,n) { \
+	dev_init(c,n,open), dev_init(c,n,close), \
+	(dev_type_read((*))) enodev, \
+	(dev_type_write((*))) enodev, \
+	 dev_init(c,n,ioctl), \
+	(dev_type_stop((*))) enodev, 0, \
+	(dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
+
 struct cdevsw cdevsw[] =
 {
 	cdev_cn_init(1,cn),		/* 0: virtual console */
@@ -125,7 +135,7 @@ struct cdevsw cdevsw[] =
 	cdev_kstat_init(NKSTAT,kstat),	/* 15: kernel statistics */
 	cdev_kexec_init(NKEXEC,kexec),	/* 16: kexec */
 	cdev_disk_init(NWD,wd),         /* 17: ST506/ESDI/IDE disk */
-	cdev_notdef(),			/* 18 */
+	cdev_vmm_init(NVMM, vmm),	/* 18: vmm */
 	cdev_notdef(),			/* 19 */
 	cdev_notdef(),			/* 20 */
 	cdev_notdef(),			/* 21 */

@@ -22,3 +22,6 @@ cdev_decl(opalcons);
 
 cdev_decl(kexec);
 cdev_decl(openprom);
+
+#include "vmm.h"
+cdev_decl(vmm);
