@@ -25,7 +25,18 @@
 #define CS_L		(1 << 13)
 #define CS_D		(1 << 14)
 
+#define SEG_AR_A	(1 << 0)		/* Accessed bit */
+#define SEG_AR_RW	(1 << 1)		/* Read/write bit */
+#define SEG_AR_DC	(1 << 2)		/* Direction/Conforming bit */
+#define SEG_AR_E	(1 << 3)		/* Executable bit */
+#define SEG_AR_S	(1 << 4)		/* Descriptor type bit */
+#define SEG_AR_DPL	((1 << 5) | (1 << 6))	/* Descriptor Privilege Lvl */
+#define SEG_AR_P	(1 << 7)		/* Present bit */
+
+/* Extended Feature Flags */
+#define EFLAGS_DF	(1 << 10)	/* Direction flag */
 #define EFLAGS_VM	(1 << 17)	/* Virtual 8086 Mode enabled */
+#define EFLAGS_AC	(1 << 18)	/* Alignment check / Access control */
 
 /* Instruction Prefixes (SDM Vol 2, 2.1.1) */
 #define LEG_1_LOCK	0xF0
@@ -133,5 +144,6 @@ struct x86_insn {
 
 int	insn_decode(struct vm_exit *, struct x86_insn *);
 int	insn_emulate(struct vm_exit *, struct x86_insn *);
+int	detect_cpu_mode(struct vcpu_reg_state *);
 
 #endif /* _MMIO_H_ */

@@ -58,6 +58,10 @@ void	 create_memory_map(struct vm_create_params *);
 static int	loadfile_bios(gzFile, off_t, struct vcpu_reg_state *);
 static int	vcpu_exit_eptviolation(struct vm_run_params *);
 static void	vcpu_exit_inout(struct vm_run_params *);
+static int	read_vmem(struct vm_run_params *, uint8_t, uint64_t, void *,
+    size_t);
+static int	write_vmem(struct vm_run_params *, uint8_t, uint64_t, void *,
+    size_t);
 
 extern struct vmd_vm	*current_vm;
 extern int		 con_fd;
@@ -463,36 +467,106 @@ void
 vcpu_exit_inout(struct vm_run_params *vrp)
 {
 	struct vm_exit *vei = vrp->vrp_exit;
-	uint8_t intr = 0xFF;
+	struct vcpu_reg_state *vrs = &vei->vrs;
+	uint8_t intr = 0xFF, data_sz = 0, addr_sz = 0, segment;
+	int dir = 1, ret = 0;
+	uint32_t data;
+	uint64_t mask, rax = 0, rcx = 0, rdi = 0, rsi = 0;
+	size_t i, times = 1;
 
-	if (vei->vei.vei_rep || vei->vei.vei_string) {
-#ifdef MMIO_DEBUG
-		log_info("%s: %s%s%s %d-byte, enc=%d, data=0x%08x, port=0x%04x",
-		    __func__,
-		    vei->vei.vei_rep == 0 ? "" : "REP ",
-		    vei->vei.vei_dir == VEI_DIR_IN ? "IN" : "OUT",
-		    vei->vei.vei_string == 0 ? "" : "S",
-		    vei->vei.vei_size, vei->vei.vei_encoding,
-		    vei->vei.vei_data, vei->vei.vei_port);
-		log_info("%s: ECX = 0x%llx, RDX = 0x%llx, RSI = 0x%llx",
-		    __func__,
-		    vei->vrs.vrs_gprs[VCPU_REGS_RCX],
-		    vei->vrs.vrs_gprs[VCPU_REGS_RDX],
-		    vei->vrs.vrs_gprs[VCPU_REGS_RSI]);
-#endif /* MMIO_DEBUG */
-		fatalx("%s: can't emulate REP prefixed IN(S)/OUT(S)",
-		    __func__);
+	data_sz = vei->vei.vei_size;
+	if (data_sz != 1 && data_sz != 2 && data_sz != 4)
+		fatalx("invalid in/out data size: %u", data_sz);
+	segment = vei->vei.vei_segment;
+
+	if (vei->vei.vei_string) {
+		rax = vrs->vrs_gprs[VCPU_REGS_RAX];
+		rsi = vrs->vrs_gprs[VCPU_REGS_RSI];
+		rdi = vrs->vrs_gprs[VCPU_REGS_RDI];
+
+		if (segment >= VCPU_REGS_NSREGS || segment == VCPU_REGS_LDTR ||
+		    segment == VCPU_REGS_TR)
+			fatalx("%s: invalid segment register: %u", __func__,
+			    vei->vei.vei_segment);
+		addr_sz = vei->vei.vei_addr_size;
+		if (addr_sz == 0)
+			fatalx("%s: invalid address size", __func__);
+		else if (addr_sz == 64)
+			mask = (uint64_t)(-1);
+		else
+			mask = (1ULL << addr_sz) -1;
+
+		/* Identify direction and iteration count if using REP. */
+		if (vei->vei.vei_rep) {
+			rcx = vrs->vrs_gprs[VCPU_REGS_RCX];
+			times = rcx;
+			if (vrs->vrs_gprs[VCPU_REGS_RFLAGS] & EFLAGS_DF)
+				dir = -1;
+		}
 	}
 
-	if (ioports_map[vei->vei.vei_port] != NULL)
-		intr = ioports_map[vei->vei.vei_port](vrp);
-	else if (vei->vei.vei_dir == VEI_DIR_IN)
-		set_return_data(vei, 0xFFFFFFFF);
+	for (i = 0; i < times; i++) {
+		/* If OUTS, we need our input from (%rsi). */
+		if (vei->vei.vei_string && vei->vei.vei_dir == VEI_DIR_OUT) {
+			data = 0;
+			ret = read_vmem(vrp, segment, rsi & mask, &data,
+			    data_sz);
+			if (ret) {
+				if (ret != EFAULT)
+					fatalx("read_vmem");
+				/* XXX inject #PF */
+				fatalx("page fault in read_vmem: 0x%llx", rsi);
+			}
+			data &= 0xFFFFFFFF;
+			vei->vei.vei_data = data;
+			rsi += (data_sz * dir);
+		}
 
-	vei->vrs.vrs_gprs[VCPU_REGS_RIP] += vei->vei.vei_insn_len;
+		/* Emulate some of the IO by calling the handler. */
+		if (ioports_map[vei->vei.vei_port])
+			intr &= ioports_map[vei->vei.vei_port](vrp);
+		else if (vei->vei.vei_dir == VEI_DIR_IN && !vei->vei.vei_string)
+			set_return_data(vei, 0xFFFFFFFF);
 
+		/* If INS, we instead write output to (%rdi). */
+		if (vei->vei.vei_string && vei->vei.vei_dir == VEI_DIR_IN) {
+			data = vei->vei.vei_data;
+			ret = write_vmem(vrp, segment, rdi & mask, &data,
+			    data_sz);
+			if (ret) {
+				if (ret != EFAULT)
+					fatalx("write_vmem");
+				/* XXX inject #PF */
+				fatalx("page fault in write_vmem: 0x%llx", rdi);
+			}
+			rdi += (data_sz * dir);
+		}
+
+		if (vei->vei.vei_rep)
+			rcx--;
+	}
+
+	/*
+	 * XXX Update RSI & RDI after emulation and restore our data field.
+	 * vmm(4) currently overwrites RAX on re-entry using vei_data.
+	 */
+	if (vei->vei.vei_string) {
+		vrs->vrs_gprs[VCPU_REGS_RCX] = rcx;
+		vrs->vrs_gprs[VCPU_REGS_RDI] = rdi;
+		vrs->vrs_gprs[VCPU_REGS_RSI] = rsi;
+		if (vei->vei.vei_dir == VEI_DIR_IN)
+			vei->vei.vei_data = (uint32_t)rax;
+	}
+
+	/* Assert any interrupt. */
 	if (intr != 0xFF)
 		vcpu_assert_irq(vrp->vrp_vm_id, vrp->vrp_vcpu_id, intr);
+
+	/*
+	 * Advance RIP before we re-enter the guest.
+	 * XXX oce we handle injecting #PF, this will be conditional.
+	 */
+	vei->vrs.vrs_gprs[VCPU_REGS_RIP] += vei->vei.vei_insn_len;
 }
 
 /*
@@ -1126,6 +1200,147 @@ translate_gva(struct vm_exit* exit, uint64_t va, uint64_t* pa, int mode)
 	log_debug("%s: final GPA for GVA 0x%llx = 0x%llx\n", __func__, va, *pa);
 
 	return (0);
+}
+
+/*
+ * Read a value from guest memory using the given guest virtual address.
+*/
+static int
+read_vmem(struct vm_run_params *vrp, uint8_t segment, uint64_t gva, void *buf,
+    size_t len)
+{
+	int ac = 0, mode, ret = 0;
+	uint32_t seg_ar = 0;
+	uint64_t gpa = 0ULL;
+	struct vcpu_reg_state *vrs = &vrp->vrp_exit->vrs;
+	struct vcpu_segment_info *seg_info = &vrs->vrs_sregs[segment];
+
+	mode = detect_cpu_mode(vrs);
+
+	/* Alignment check needed? */
+	if (vrp->vrp_exit->cpl == 3 &&
+	    (vrs->vrs_gprs[VCPU_REGS_RFLAGS] & EFLAGS_AC)) {
+		ac = 1;
+	}
+
+	switch (mode) {
+	case VMM_CPU_MODE_LONG:
+		if (ac && gva % 64 != 0) {
+			/* XXX inject #AC(0) */
+			return (EINVAL);
+		}
+		/* Fallthrough: if AC is checked again, 64 % 32 = 0. */
+	case VMM_CPU_MODE_COMPAT:
+		if (ac && gva % 32 != 0) {
+			/* XXX inject #AC(0) */
+			return (EINVAL);
+		}
+
+		ret = translate_gva(vrp->vrp_exit, gva, &gpa, PROT_READ);
+		if (ret)
+			return ret;
+		break;
+	case VMM_CPU_MODE_PROT32:
+		if (ac && gva % 32 != 0) {
+			/* XXX inject #AC(0) */
+			return (EINVAL);
+		}
+		/* Fallthrough: if AC is checked again, 32 % 16 = 0. */
+	case VMM_CPU_MODE_PROT:
+		if (ac && gva % 16 != 0) {
+			/* XXX inject #AC(0) */
+			return (EINVAL);
+		}
+		/* Check for present, non-system segment. */
+		if (!(seg_ar & SEG_AR_P) || !(seg_ar & SEG_AR_S))
+			return (EINVAL);
+
+		/* Check segment limit. */
+		seg_ar = seg_info->vsi_ar;
+		if ((seg_ar & SEG_AR_DC) &&
+		   (uint32_t)gva < seg_info->vsi_limit)
+			return (EINVAL);
+		else if ((uint32_t)gva > seg_info->vsi_limit)
+			return (EINVAL);
+
+		/* Compute guest linear address. */
+		gpa = (uint32_t)gva + seg_info->vsi_base;
+		break;
+	case VMM_CPU_MODE_REAL:
+		/* Not in protected mode. */
+		gpa = (uint16_t)gva + (seg_info->vsi_base * 16);
+		break;
+	default:
+		/* XXX Virtual8086 mode. */
+		log_warnx("%s: unsupported cpu mode %d", __func__, mode);
+		return (EINVAL);
+	}
+
+	return read_mem((paddr_t)gpa, buf, len);
+}
+
+/*
+ * Write a value to guest memory using the given guest virtual adress.
+ */
+static int
+write_vmem(struct vm_run_params *vrp, uint8_t segment, uint64_t gva, void *buf,
+    size_t len)
+{
+	int mode, ret = 0;
+	uint32_t seg_ar = 0, want;
+	uint64_t gpa = 0ULL;
+	struct vcpu_reg_state *vrs = &vrp->vrp_exit->vrs;
+	struct vcpu_segment_info *seg_info = &vrs->vrs_sregs[segment];
+
+	mode = detect_cpu_mode(vrs);
+
+	switch (mode) {
+	case VMM_CPU_MODE_COMPAT:
+	case VMM_CPU_MODE_LONG:
+		/* Long mode with or without paging enabled */
+		ret = translate_gva(vrp->vrp_exit, gva, &gpa, PROT_WRITE);
+		if (ret)
+			return ret;
+		break;
+	case VMM_CPU_MODE_PROT:
+	case VMM_CPU_MODE_PROT32:
+		/* No paging, so fall back to segmentation. */
+		seg_ar = seg_info->vsi_ar;
+
+		/* Check for present, non-syste, writable segment. */
+		want = SEG_AR_P | SEG_AR_S | SEG_AR_RW;
+		if ((seg_ar & want) != want) {
+			log_warnx("%s: invalid segment bits: 0x%x", __func__,
+			    seg_ar);
+			return (EINVAL);
+		}
+
+		/* Check segment limit. */
+		if ((seg_ar & SEG_AR_DC) &&
+		    (uint32_t)gva < seg_info->vsi_limit) {
+			log_warnx("%s: 0x%llx outside limit 0x%x", __func__,
+			    gva, seg_info->vsi_limit);
+			return (EINVAL);
+		}
+		else if ((uint32_t)gva > seg_info->vsi_limit) {
+			log_warnx("%s: 0x%llx outside limit 0x%x", __func__,
+			    gva, seg_info->vsi_limit);
+			return (EINVAL);
+		}
+
+		/* Compute guest linear address. */
+		gpa = (uint32_t)gva + seg_info->vsi_base;
+		break;
+	case VMM_CPU_MODE_REAL:
+		/* Not in protected mode. */
+		gpa = (uint16_t)gva + seg_info->vsi_base;
+		break;
+	default:
+		log_warnx("%s: unsupported cpu mode %d", __func__, mode);
+		return (EINVAL);
+	}
+
+	return write_mem((paddr_t)gpa, buf, len);
 }
 
 int

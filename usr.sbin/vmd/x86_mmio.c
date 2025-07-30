@@ -48,7 +48,6 @@ static const char *str_opcode(struct x86_opcode *);
 static const char *str_operand_enc(struct x86_opcode *);
 static const char *str_reg(int);
 static const char *str_sreg(int);
-static int detect_cpu_mode(struct vcpu_reg_state *);
 
 static enum decode_result decode_prefix(struct x86_decode_state *,
     struct x86_insn *);
@@ -364,7 +363,7 @@ str_sreg(int sreg) {
 	}
 }
 
-static int
+int
 detect_cpu_mode(struct vcpu_reg_state *vrs)
 {
 	uint64_t cr0, cr4, cs, efer, rflags;

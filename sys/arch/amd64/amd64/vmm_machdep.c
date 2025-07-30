@@ -3680,6 +3680,14 @@ vcpu_run_vmx(struct vcpu *vcpu, struct vm_run_params *vrp)
 	case VMX_EXIT_IO:
 		if (vcpu->vc_exit.vei.vei_dir == VEI_DIR_IN)
 			vcpu->vc_gueststate.vg_rax = vcpu->vc_exit.vei.vei_data;
+		if (vcpu->vc_exit.vei.vei_string) {
+			vcpu->vc_gueststate.vg_rcx =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RCX];
+			vcpu->vc_gueststate.vg_rdi =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RDI];
+			vcpu->vc_gueststate.vg_rsi =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RSI];
+		}
 		vcpu->vc_gueststate.vg_rip =
 		    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RIP];
 		if (vmwrite(VMCS_GUEST_IA32_RIP, vcpu->vc_gueststate.vg_rip)) {
@@ -5302,36 +5310,54 @@ vmm_get_guest_cpu_mode(struct vcpu *vcpu)
 int
 svm_handle_inout(struct vcpu *vcpu)
 {
-	uint64_t insn_length, exit_qual;
+	uint64_t exit_qual;
+	struct vm_exit_inout *vei = &vcpu->vc_exit.vei;
 	struct vmcb *vmcb = (struct vmcb *)vcpu->vc_control_va;
 
-	insn_length = vmcb->v_exitinfo2 - vmcb->v_rip;
+	memset(vei, 0, sizeof(*vei));
+
+	vei->vei_insn_len = (uint8_t)(vmcb->v_exitinfo2 - vmcb->v_rip);
 	exit_qual = vmcb->v_exitinfo1;
 
 	/* Bit 0 - direction */
 	if (exit_qual & 0x1)
-		vcpu->vc_exit.vei.vei_dir = VEI_DIR_IN;
+		vei->vei_dir = VEI_DIR_IN;
 	else
-		vcpu->vc_exit.vei.vei_dir = VEI_DIR_OUT;
+		vei->vei_dir = VEI_DIR_OUT;
 	/* Bit 2 - string instruction? */
-	vcpu->vc_exit.vei.vei_string = (exit_qual & 0x4) >> 2;
+	vei->vei_string = (exit_qual & 0x4) >> 2;
 	/* Bit 3 - REP prefix? */
-	vcpu->vc_exit.vei.vei_rep = (exit_qual & 0x8) >> 3;
+	vei->vei_rep = (exit_qual & 0x8) >> 3;
 
 	/* Bits 4:6 - size of exit */
 	if (exit_qual & 0x10)
-		vcpu->vc_exit.vei.vei_size = 1;
+		vei->vei_size = 1;
 	else if (exit_qual & 0x20)
-		vcpu->vc_exit.vei.vei_size = 2;
+		vei->vei_size = 2;
 	else if (exit_qual & 0x40)
-		vcpu->vc_exit.vei.vei_size = 4;
+		vei->vei_size = 4;
 
 	/* Bit 16:31 - port */
-	vcpu->vc_exit.vei.vei_port = (exit_qual & 0xFFFF0000) >> 16;
+	vei->vei_port = (exit_qual & 0xFFFF0000) >> 16;
 	/* Data */
-	vcpu->vc_exit.vei.vei_data = vmcb->v_rax;
+	vei->vei_data = vmcb->v_rax;
 
-	vcpu->vc_exit.vei.vei_insn_len = (uint8_t)insn_length;
+	/* For INS/OUTS, populate additional fields from exit qualification */
+	if (vei->vei_string) {
+		if (exit_qual & 0x80)
+			vei->vei_addr_size = 16;
+		else if (exit_qual & 0x100)
+			vei->vei_addr_size = 32;
+		else if (exit_qual & 0x200)
+			vei->vei_addr_size = 64;
+
+		/* INS always uses ES. No override supported */
+		if (vei->vei_dir == VEI_DIR_IN)
+			vei->vei_segment = VCPU_REGS_ES;
+		else
+			vei->vei_segment =
+			    (uint8_t)((exit_qual & 0x1c00) >> 10);
+	}
 
 	TRACEPOINT(vmm, inout, vcpu, vcpu->vc_exit.vei.vei_port,
 	    vcpu->vc_exit.vei.vei_dir, vcpu->vc_exit.vei.vei_data);
@@ -5354,12 +5380,17 @@ svm_handle_inout(struct vcpu *vcpu)
 int
 vmx_handle_inout(struct vcpu *vcpu)
 {
-	uint64_t insn_length, exit_qual;
+	uint64_t insn_length, exit_qual, exit_info;
+	struct vm_exit_inout *vei = &vcpu->vc_exit.vei;
+
+	memset (vei, 0, sizeof(*vei));
 
 	if (vmread(VMCS_INSTRUCTION_LENGTH, &insn_length)) {
 		printf("%s: can't obtain instruction length\n", __func__);
 		return (EINVAL);
 	}
+
+	vei->vei_insn_len = (uint8_t)insn_length;
 
 	if (vmx_get_exit_qualification(&exit_qual)) {
 		printf("%s: can't get exit qual\n", __func__);
@@ -5367,24 +5398,41 @@ vmx_handle_inout(struct vcpu *vcpu)
 	}
 
 	/* Bits 0:2 - size of exit */
-	vcpu->vc_exit.vei.vei_size = (exit_qual & 0x7) + 1;
+	vei->vei_size = (exit_qual & 0x7) + 1;
 	/* Bit 3 - direction */
 	if ((exit_qual & 0x8) >> 3)
-		vcpu->vc_exit.vei.vei_dir = VEI_DIR_IN;
+		vei->vei_dir = VEI_DIR_IN;
 	else
-		vcpu->vc_exit.vei.vei_dir = VEI_DIR_OUT;
+		vei->vei_dir = VEI_DIR_OUT;
 	/* Bit 4 - string instruction? */
-	vcpu->vc_exit.vei.vei_string = (exit_qual & 0x10) >> 4;
+	vei->vei_string = (exit_qual & 0x10) >> 4;
 	/* Bit 5 - REP prefix? */
-	vcpu->vc_exit.vei.vei_rep = (exit_qual & 0x20) >> 5;
+	vei->vei_rep = (exit_qual & 0x20) >> 5;
 	/* Bit 6 - Operand encoding */
-	vcpu->vc_exit.vei.vei_encoding = (exit_qual & 0x40) >> 6;
+	vei->vei_encoding = (exit_qual & 0x40) >> 6;
 	/* Bit 16:31 - port */
-	vcpu->vc_exit.vei.vei_port = (exit_qual & 0xFFFF0000) >> 16;
+	vei->vei_port = (exit_qual & 0xFFFF0000) >> 16;
 	/* Data */
-	vcpu->vc_exit.vei.vei_data = (uint32_t)vcpu->vc_gueststate.vg_rax;
+	vei->vei_data = (uint32_t)vcpu->vc_gueststate.vg_rax;
 
-	vcpu->vc_exit.vei.vei_insn_len = (uint8_t)insn_length;
+	/* For INS/OUTS, populate additional fields from exit info. */
+	if (vei->vei_string) {
+		if (vmread(VMCS_EXIT_INSTRUCTION_INFO, &exit_info)) {
+			printf("%s: can't obtain exit instruction info\n",
+			    __func__);
+			return (EINVAL);
+		}
+		/* Address size is 0 (16-bit), 1 (32-bit), or 2 (64-bit). */
+		vei->vei_addr_size = 16 +
+		    (16 * (uint8_t)((exit_info & 0x380) >> 7));
+
+		/* INS always uses ES. No override supported. */
+		if (vei->vei_dir == VEI_DIR_IN)
+			vei->vei_segment = VCPU_REGS_ES;
+		else
+			vei->vei_segment =
+			    (uint8_t)((exit_info & 0x38000) >> 15);
+	}
 
 	TRACEPOINT(vmm, inout, vcpu, vcpu->vc_exit.vei.vei_port,
 	    vcpu->vc_exit.vei.vei_dir, vcpu->vc_exit.vei.vei_data);
@@ -6611,6 +6659,14 @@ vcpu_run_svm(struct vcpu *vcpu, struct vm_run_params *vrp)
 			vcpu->vc_gueststate.vg_rax =
 			    vcpu->vc_exit.vei.vei_data;
 			vmcb->v_rax = vcpu->vc_gueststate.vg_rax;
+		}
+		if (vcpu->vc_exit.vei.vei_string) {
+			vcpu->vc_gueststate.vg_rcx =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RCX];
+			vcpu->vc_gueststate.vg_rdi =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RDI];
+			vcpu->vc_gueststate.vg_rsi =
+			    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RSI];
 		}
 		vcpu->vc_gueststate.vg_rip =
 		    vcpu->vc_exit.vrs.vrs_gprs[VCPU_REGS_RIP];
