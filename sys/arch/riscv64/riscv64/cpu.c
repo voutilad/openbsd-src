@@ -38,6 +38,8 @@
 #include <dev/ofw/ofw_thermal.h>
 #include <dev/ofw/fdt.h>
 
+#include "vmm.h"
+
 /* CPU Identification */
 #define CPU_VENDOR_SIFIVE	0x489
 #define CPU_VENDOR_THEAD	0x5b7
@@ -102,13 +104,18 @@ size_t	thead_dcache_line_size;
 void
 cpu_identify(struct cpu_info *ci)
 {
-	char isa[32];
+	char isa[32], isa_extensions[128];
 	uint64_t marchid, mimpid;
 	uint32_t mvendorid;
 	const char *vendor_name = NULL;
 	const char *arch_name = NULL;
 	struct arch *archlist = cpu_arch_none;
 	int i, len;
+
+#if NVMM > 0
+	int hmode = 0;
+	extern int vmm_hmode;
+#endif /* NVMM > 0 */
 
 	mvendorid = sbi_get_mvendorid();
 	marchid = sbi_get_marchid();
@@ -144,6 +151,28 @@ cpu_identify(struct cpu_info *ci)
 		printf(" %s", isa);
 		strlcpy(cpu_model, isa, sizeof(cpu_model));
 	}
+
+#if NVMM > 0
+	len = OF_getprop(ci->ci_node, "riscv,isa-extensions",
+	    isa_extensions, sizeof(isa_extensions));
+
+	if (len != -1) {
+		i = 0;
+		while (i <= len) {
+			if (strncmp("h", &isa_extensions[i], 1) == 0)
+				hmode = 1;
+
+			i += strlen(&isa_extensions[i]) + 1;
+		}
+	}
+
+	if (hmode)
+		printf(", hmode");
+
+	/* support hmode if all CPUs have h-extension */
+	vmm_hmode &= hmode;
+#endif /* NVMM > 0 */
+
 	printf("\n");
 
 	/* Handle errata. */
@@ -295,7 +324,7 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		}
 
 		printf("%s:", dev->dv_xname);
-		
+
 		if (OF_getproplen(node, "cache-unified") == 0) {
 			printf(" %d%s %db/line %d-way L%d cache",
 			    isize, unit, iline, iways, level);
@@ -797,7 +826,7 @@ cpu_opp_get_cooling_level(void *cookie, uint32_t *cells)
 {
 	struct cpu_info *ci = cookie;
 	struct opp_table *ot = ci->ci_opp_table;
-	
+
 	return ot->ot_nopp - ci->ci_opp_max - 1;
 }
 

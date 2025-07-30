@@ -196,3 +196,10 @@ file	dev/fdt/pciecam.c			pciecam
 # Machine-independent USB drivers
 include "dev/usb/files.usb"
 
+#
+# VMM
+#
+device vmm {}
+attach vmm at mainbus
+file	dev/vmm/vmm.c				vmm		needs-flag
+file	arch/riscv64/riscv64/vmm_machdep.c	vmm		needs-flag

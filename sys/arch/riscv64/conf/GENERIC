@@ -300,3 +300,5 @@ pseudo-device	hotplug		1	# devices hot plugging
 
 # mouse & keyboard multiplexor pseudo-devices
 pseudo-device	wsmux		2
+
+vmm0		at mainbus0
