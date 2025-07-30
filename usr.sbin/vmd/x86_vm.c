@@ -655,11 +655,20 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 	struct x86_insn insn;
 	uint64_t va, pa;
 	size_t len = 15;		/* Max instruction length in x86. */
+	uint64_t pagesize, pagemask;
+
+	/* XXX probably should just calculate these once, not on each exit */
+	pagesize = sysconf(_SC_PAGESIZE);
+	pagemask = pagesize - 1;
+
 	switch (ve->vee.vee_fault_type) {
 	case VEE_FAULT_HANDLED:
 		break;
 
 	case VEE_FAULT_MMIO_ASSIST:
+		log_debug("%s: EPT Vuilation, mmio assist requested: "
+		    "rip=0x%llx", __progname, ve->vrs.vrs_gprs[VCPU_REGS_RIP]);
+
 		/* Intel VMX might give us the length of the instruction. */
 		if (ve->vee.vee_insn_info & VEE_LEN_VALID)
 			len = ve->vee.vee_insn_len;
@@ -675,7 +684,7 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 			va = ve->vrs.vrs_gprs[VCPU_REGS_RIP];
 
 			/* XXX Only support instructions that fit on 1 page. */
-			if ((va & PAGE_MASK) + len > PAGE_SIZE) {
+			if ((va & pagemask) + len > pagesize) {
 				log_warnx("%s: instruction might cross page "
 				    "boundary", __func__);
 				ret = EINVAL;

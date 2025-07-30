@@ -475,8 +475,10 @@ decode_modrm(struct x86_decode_state *state, struct x86_insn *insn)
 	enum decode_result res;
 	uint8_t byte = 0;
 
-	if (!is_valid_state(state, __func__) || insn == NULL)
+	if (!is_valid_state(state, __func__) || insn == NULL) {
+		log_warnx("%s: invalid state or null insn", __func__);
 		return (DECODE_ERROR);
+	}
 
 	insn->insn_modrm_valid = 0;
 
@@ -493,14 +495,12 @@ decode_modrm(struct x86_decode_state *state, struct x86_insn *insn)
 		insn->insn_modrm = byte;
 		insn->insn_modrm_valid = 1;
 		break;
-
 	case OP_ENC_I:
 	case OP_ENC_OI:
 		log_warnx("%s: instruction does not need memory assist",
 		    __func__);
 		res = DECODE_ERROR;
 		break;
-
 	default:
 		/* Peek to see if we're done decode. */
 		res = peek_byte(state, NULL);
@@ -605,22 +605,55 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 	enum decode_result res = DECODE_ERROR;
 	uint64_t disp = 0;
 
-	if (!is_valid_state(state, __func__) || insn == NULL)
+	if (!is_valid_state(state, __func__) || insn == NULL) {
+		log_warnx("%s: invalid state", __func__);
 		return (DECODE_ERROR);
+	}
 
-	if (!insn->insn_modrm_valid)
+	if (insn->insn_opcode.op_encoding == OP_ENC_FD) {
+		/* XXX rex prefix override needs handling here */
+		/*     cannot count on processor mode to determine */
+		/*     op size */
+		switch (insn->insn_cpu_mode) {
+		case VMM_CPU_MODE_PROT32:
+			insn->insn_disp_type = DISP_4;
+			res = next_value(state, 4, &disp);
+			if (res == DECODE_ERROR) {
+				log_warnx("%s: decode error in next_value for "
+				    "disp %d", __func__, insn->insn_disp_type);
+				return (res);
+			}
+			insn->insn_disp = disp;
+			return (res);
+		case VMM_CPU_MODE_LONG:
+		case VMM_CPU_MODE_COMPAT:
+		default:
+			log_warnx("%s: unimplemented displacement decode",
+			    __func__);
+			return (DECODE_ERROR);
+		}
+	}
+
+	if (!insn->insn_modrm_valid) {
+		log_warnx("%s: invalid modrm", __func__);
 		return (DECODE_ERROR);
+	}
 
+	log_warnx("%s: mod = %d\n", __func__, MODRM_MOD(insn->insn_modrm));
 	switch (MODRM_MOD(insn->insn_modrm)) {
 	case 0x00:
 		insn->insn_disp_type = DISP_0;
 		res = DECODE_MORE;
+		log_warnx("%s: returning DECODE_MORE", __func__);
 		break;
 	case 0x01:
 		insn->insn_disp_type = DISP_1;
 		res = next_value(state, 1, &disp);
-		if (res == DECODE_ERROR)
+		if (res == DECODE_ERROR) {
+			log_warnx("%s: decode error in next_value for disp 0x1",
+			    __func__);
 			return (res);
+		}
 		insn->insn_disp = disp;
 		break;
 	case 0x02:
@@ -631,15 +664,21 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 			insn->insn_disp_type = DISP_4;
 			res = next_value(state, 4, &disp);
 		}
-		if (res == DECODE_ERROR)
+		if (res == DECODE_ERROR) {
+			log_warnx("%s: decode error in next_value for disp %d",
+			    __func__, insn->insn_disp_type);
 			return (res);
+		}
 		insn->insn_disp = disp;
 		break;
 	default:
 		insn->insn_disp_type = DISP_NONE;
 		res = DECODE_MORE;
+		log_warnx("%s: ?? DISP_NONE fallthrough", __func__);
 	}
 
+	log_warnx("%s: returning calculated displacement of 0x%llx", __func__,
+	    insn->insn_disp);
 	return (res);
 }
 
@@ -939,6 +978,8 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 	int ret;
 	uint64_t va;
 	uint64_t pa;
+
+	log_warnx("%s: entered", __func__);
 
 	if (insn->insn_opcode.op_encoding == OP_ENC_MR) {
 		va = insn->insn_gva;
