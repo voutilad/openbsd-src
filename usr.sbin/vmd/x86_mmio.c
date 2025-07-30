@@ -24,6 +24,7 @@
 #include "vmd.h"
 #include "mmio.h"
 #include "x86_mmio.h"
+#include "x86_vm.h"
 
 #define MMIO_DEBUG 1
 
@@ -936,12 +937,35 @@ err:
 static int
 emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 {
-	/* XXX Only supports read to register for now */
-	if (insn->insn_opcode.op_encoding != OP_ENC_RM)
-		return (-1);
+	int ret;
+	uint64_t va;
+	uint64_t pa;
 
-	/* XXX No device emulation yet. Fill with 0xFFs. */
-	exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
+	if (insn->insn_opcode.op_encoding == OP_ENC_MR) {
+		va = insn->insn_gva;
+		ret = translate_gva(exit, va, &pa, PROT_READ);
+		if (ret) {
+			log_warnx("%s: VA translation failed for gva 0x%llx",
+			    __func__, va);
+			return -1;
+		}
+		log_debug("%s: mov from gva 0x%llx (gpa 0x%llx) -> reg %d",
+		    __func__, va, pa, insn->insn_reg);
+
+		exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
+	}
+
+	if (insn->insn_opcode.op_encoding != OP_ENC_RM) {
+		va = insn->insn_gva;
+		ret = translate_gva(exit, va, &pa, PROT_WRITE);
+		if (ret) {
+			log_warnx("%s: VA translation failed for gva 0x%llx",
+			    __func__, va);
+			return -1;
+		}
+		log_debug("%s: mov from reg %d -> gva 0x%llx (gpa 0x%llx)",
+		    __func__, insn->insn_reg, va, pa);
+	}
 
 	return (0);
 }
