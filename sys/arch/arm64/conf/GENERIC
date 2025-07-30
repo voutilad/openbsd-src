@@ -638,3 +638,5 @@ pseudo-device	dt
 
 # mouse & keyboard multiplexor pseudo-devices
 pseudo-device	wsmux		2
+
+vmm0		at mainbus0

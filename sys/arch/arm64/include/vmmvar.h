@@ -51,6 +51,13 @@ struct vcpu_reg_state {
 	uint64_t			vrs_gprs[VCPU_REGS_NGPRS];
 };
 
+enum {
+	VMM_MODE_UNKNOWN,
+	VMM_MODE_EL2,
+	VMM_MODE_VHE,
+	VMM_MODE_GUNYAH,
+};
+
 /*
  * struct vm_exit
  *
@@ -89,5 +96,44 @@ enum {
 
 /* IOCTL definitions */
 #define VMM_IOC_INTR _IOW('V', 6, struct vm_intr_params) /* Intr pending */
+
+/*
+ * Virtual CPU
+ *
+ * Methods used to vcpu struct members:
+ *	a	atomic operations
+ *	I	immutable operations
+ *	K	kernel lock
+ *	r	reference count
+ *	v	vcpu rwlock
+ *	V	vm struct's vcpu list lock (vm_vcpu_lock)
+ */
+struct vcpu {
+	struct vm *vc_parent;			/* [I] */
+	uint32_t vc_id;				/* [I] */
+	u_int vc_state;				/* [a] */
+	SLIST_ENTRY(vcpu) vc_vcpu_link;		/* [V] */
+
+	struct rwlock vc_lock;
+};
+
+SLIST_HEAD(vcpu_head, vcpu);
+
+/* Forward declarations */
+struct vm;
+struct vm_create_params;
+
+int	vmm_start(void);
+int	vmm_stop(void);
+int	vm_impl_init(struct vm *, struct proc *);
+void	vm_impl_deinit(struct vm *);
+int	vcpu_init(struct vcpu *, struct vm_create_params *);
+void	vcpu_deinit(struct vcpu *);
+void	vmm_attach_machdep(struct device *, struct device *, void *);
+void	vmm_activate_machdep(struct device *, int);
+int	vm_rwregs(struct vm_rwregs_params *, int);
+int	pledge_ioctl_vmm_machdep(struct proc *, long);
+int	vcpu_reset_regs(struct vcpu *, struct vcpu_reg_state *);
+
 
 #endif /* ! _MACHINE_VMMVAR_H_ */

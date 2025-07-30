@@ -303,3 +303,11 @@ device  apm
 attach  apm at mainbus
 file	arch/arm64/dev/apm.c			apm		needs-flag
 file	arch/arm64/arm64/acpiapm.c		apm
+
+#
+# VMM
+#
+device	vmm {}
+attach	vmm at mainbus
+file	dev/vmm/vmm.c				vmm		needs-flag
+file	arch/arm64/arm64/vmm_machdep.c		vmm		needs-flag

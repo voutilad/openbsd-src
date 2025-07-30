@@ -58,4 +58,7 @@ cdev_decl(openprom);
 cdev_decl(apm);
 cdev_decl(acpiapm);
 
+#include "vmm.h"
+cdev_decl(vmm);
+
 #endif	/* _MACHINE_CONF_H_ */

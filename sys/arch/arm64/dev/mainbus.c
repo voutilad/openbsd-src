@@ -28,6 +28,8 @@
 #include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/ofw_thermal.h>
 
+#include "vmm.h"
+
 int mainbus_match(struct device *, void *, void *);
 void mainbus_attach(struct device *, struct device *, void *);
 
@@ -42,6 +44,7 @@ void mainbus_attach_apm(struct device *);
 void mainbus_attach_framebuffer(struct device *);
 void mainbus_attach_firmware(struct device *);
 void mainbus_attach_resvmem(struct device *);
+void mainbus_attach_vmm(struct device *);
 
 struct mainbus_softc {
 	struct device		 sc_dev;
@@ -163,6 +166,10 @@ mainbus_attach(struct device *parent, struct device *self, void *aux)
 	config_mountroot(self, mainbus_attach_framebuffer);
 
 	thermal_init();
+
+#if NVMM > 0
+	mainbus_attach_vmm(self);
+#endif /* NVMM > 0 */
 }
 
 int
@@ -444,4 +451,15 @@ mainbus_attach_resvmem(struct device *self)
 
 	for (node = OF_child(node); node != 0; node = OF_peer(node))
 		mainbus_attach_node(self, node, NULL);
+}
+
+void
+mainbus_attach_vmm(struct device *self)
+{
+	struct fdt_attach_args fa;
+
+	memset(&fa, 0, sizeof(fa));
+	fa.fa_name = "vmm";
+
+	config_found(self, &fa, NULL);
 }
