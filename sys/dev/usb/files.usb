@@ -236,7 +236,7 @@ attach	axen at uhub
 file	dev/usb/if_axen.c		axen
 
 # SMSC LAN95xx
-device	smsc: ether, ifnet, mii, ifmedia 
+device	smsc: ether, ifnet, mii, ifmedia
 attach	smsc at uhub
 file	dev/usb/if_smsc.c		smsc
 
@@ -440,6 +440,11 @@ file	dev/usb/if_urtw.c		urtw
 device	urtwn: ether, ifnet, ifmedia, wlan, firmload
 attach	urtwn at uhub
 file	dev/usb/if_urtwn.c		urtwn
+
+# Realtek RTL8821/RTL8822
+device	urtwx: ether, ifnet, ifmedia, wlan, firmload
+attach	urtwx at uhub
+file	dev/usb/if_urtwx.c		urtwx
 
 # Realtek RTL8188SU/RTL8191SU/RTL8192SU
 device	rsu: ether, ifnet, ifmedia, wlan, firmload
