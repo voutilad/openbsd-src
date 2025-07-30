@@ -42,6 +42,15 @@
 #include "pci.h"
 #include "virtio.h"
 #include "mmio.h"
+#include "x86_mmio.h"
+
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 0x1000
+#endif /* !PAGE_SIZE */
+
+#ifndef PAGE_MASK
+#define PAGE_MASK (PAGE_SIZE - 1)
+#endif /* !PAGE_MASK */
 
 typedef uint8_t (*io_fn_t)(struct vm_run_params *);
 
