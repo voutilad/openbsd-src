@@ -981,7 +981,10 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 
 	log_warnx("%s: entered", __func__);
 
-	if (insn->insn_opcode.op_encoding == OP_ENC_MR) {
+	switch (insn->insn_opcode.op_encoding) {
+	case OP_ENC_FD:
+	case OP_ENC_MR:
+
 		va = insn->insn_gva;
 		ret = translate_gva(exit, va, &pa, PROT_READ);
 		if (ret) {
@@ -993,9 +996,8 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		    __func__, va, pa, insn->insn_reg);
 
 		exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
-	}
-
-	if (insn->insn_opcode.op_encoding != OP_ENC_RM) {
+		break;
+	case OP_ENC_RM:
 		va = insn->insn_gva;
 		ret = translate_gva(exit, va, &pa, PROT_WRITE);
 		if (ret) {
@@ -1005,6 +1007,10 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		}
 		log_debug("%s: mov from reg %d -> gva 0x%llx (gpa 0x%llx)",
 		    __func__, insn->insn_reg, va, pa);
+		break;
+	default:
+		log_warnx("%s: unsupported encoding %s", __func__,
+		    str_operand_enc(&insn->insn_opcode));
 	}
 
 	return (0);
