@@ -1,4 +1,4 @@
-/*	$OpenBSD: mmio.h,v 1.2 2024/07/09 09:31:37 dv Exp $	*/
+/*	$OpenBSD */
 
 /*
  * Copyright (c) 2024 Mike Larkin <mlarkin@openbsd.org>
@@ -16,26 +16,53 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _MMIO_H_
-#define _MMIO_H_
+#include <errno.h>
+#include <stdlib.h>
 
 #include <sys/types.h>
 #include <sys/queue.h>
 
-typedef int (*mmio_dev_fn_t)(int dir, uint64_t *addr, uint64_t *data);
+#include "mmio.h"
+#include "vmd.h"
 
-struct mmio_dev {
-	paddr_t start;
-	paddr_t end;
+SLIST_HEAD(mmio_dev_head, mmio_dev) mmio_devs;
 
-	mmio_dev_fn_t fn;
+void
+mmio_init(void)
+{
+	SLIST_INIT(&mmio_devs);
+}
 
-	SLIST_ENTRY(mmio_dev) dev_next;
-};
+int
+mmio_dev_add(paddr_t start, paddr_t end, mmio_dev_fn_t fn)
+{
+	struct mmio_dev *dev;
 
+	dev = malloc(sizeof(*dev));
+	if (!dev)
+		return ENOMEM;
 
-void mmio_init(void);
-mmio_dev_fn_t mmio_find_dev(paddr_t);
-int mmio_dev_add(paddr_t, paddr_t, mmio_dev_fn_t);
+	dev->start = start;
+	dev->end = end;
+	dev->fn = fn;
 
-#endif /* _MMIO_H_ */
+	SLIST_INSERT_HEAD(&mmio_devs, dev, dev_next);
+	log_debug("%s: added mmio handler for range [0x%lx - 0x%lx]",
+	    __func__, start, end);
+
+	return 0;
+}
+
+mmio_dev_fn_t
+mmio_find_dev(paddr_t addr)
+{
+	struct mmio_dev *dev;
+
+	SLIST_FOREACH(dev, &mmio_devs, dev_next) {
+		if (addr >= dev->start &&
+		    addr <= dev->end)
+			return dev->fn;
+	}
+
+	return NULL;
+}

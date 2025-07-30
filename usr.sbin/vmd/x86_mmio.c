@@ -23,8 +23,9 @@
 
 #include "vmd.h"
 #include "mmio.h"
+#include "x86_mmio.h"
 
-#define MMIO_DEBUG 0
+#define MMIO_DEBUG 1
 
 extern char* __progname;
 

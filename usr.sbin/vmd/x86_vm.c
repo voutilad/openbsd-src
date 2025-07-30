@@ -35,11 +35,13 @@
 #include "fw_cfg.h"
 #include "i8253.h"
 #include "i8259.h"
+#include "i82093aa.h"
 #include "loadfile.h"
 #include "mc146818.h"
 #include "ns8250.h"
 #include "pci.h"
 #include "virtio.h"
+#include "mmio.h"
 
 typedef uint8_t (*io_fn_t)(struct vm_run_params *);
 
@@ -410,6 +412,10 @@ init_emulated_hw(struct vmop_create_params *vmc, int child_cdrom,
 	ioports_map[PCI_MODE1_DATA_REG + 3] = vcpu_exit_pci;
 	pci_init();
 
+	mmio_init();
+
+	i82093aa_init();
+
 	/* Initialize virtio devices */
 	virtio_init(current_vm, child_cdrom, child_disks, child_taps);
 
@@ -556,7 +562,7 @@ vcpu_exit(struct vm_run_params *vrp)
 /*
  * vcpu_exit_eptviolation
  *
- * handle an EPT Violation
+ * handle an EPT violation
  *
  * Parameters:
  *  vrp: vcpu run parameters containing guest state for this exit
@@ -570,16 +576,13 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 {
 	struct vm_exit *ve = vrp->vrp_exit;
 	int ret = 0;
-#if MMIO_NOTYET
 	struct x86_insn insn;
 	uint64_t va, pa;
 	size_t len = 15;		/* Max instruction length in x86. */
-#endif /* MMIO_NOTYET */
 	switch (ve->vee.vee_fault_type) {
 	case VEE_FAULT_HANDLED:
 		break;
 
-#if MMIO_NOTYET
 	case VEE_FAULT_MMIO_ASSIST:
 		/* Intel VMX might give us the length of the instruction. */
 		if (ve->vee.vee_insn_info & VEE_LEN_VALID)
@@ -622,7 +625,6 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 		if (ret == 0)
 			ret = insn_emulate(ve, &insn);
 		break;
-#endif /* MMIO_NOTYET */
 
 	case VEE_FAULT_PROTECT:
 		log_debug("%s: EPT Violation: rip=0x%llx", __progname,

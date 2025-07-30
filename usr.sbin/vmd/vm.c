@@ -42,8 +42,6 @@
 #include "virtio.h"
 #include "vmd.h"
 
-#define MMIO_NOTYET 0
-
 static int run_vm(struct vmop_create_params *, struct vcpu_reg_state *);
 static void vm_dispatch_vmm(int, short, void *);
 static void *event_thread(void *);
