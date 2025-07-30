@@ -639,6 +639,21 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		return (DECODE_ERROR);
 	}
 
+	switch (insn->insn_modrm) {
+	case 0x3D:
+		res = next_value(state, 4, &disp);
+		if (res == DECODE_ERROR) {
+			log_warnx("%s: decode error in Disp32 processing",
+			    __func__);
+			return (res);
+		}
+		insn->insn_disp = disp;
+		insn->insn_disp_type = DISP_4;
+		return (res);
+	default:
+		break;
+	}
+
 	log_warnx("%s: mod = %d\n", __func__, MODRM_MOD(insn->insn_modrm));
 	switch (MODRM_MOD(insn->insn_modrm)) {
 	case 0x00:
