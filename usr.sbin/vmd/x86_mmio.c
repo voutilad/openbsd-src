@@ -634,6 +634,7 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 				return (res);
 			}
 			insn->insn_disp = disp;
+			insn->insn_gva = disp;
 			return (res);
 		case VMM_CPU_MODE_LONG:
 		case VMM_CPU_MODE_COMPAT:
