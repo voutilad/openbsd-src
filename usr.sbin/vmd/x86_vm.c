@@ -668,7 +668,7 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 		break;
 
 	case VEE_FAULT_MMIO_ASSIST:
-		log_debug("%s: EPT Vuilation, mmio assist requested: "
+		log_debug("%s: EPT violation, mmio assist requested: "
 		    "rip=0x%llx", __progname, ve->vrs.vrs_gprs[VCPU_REGS_RIP]);
 
 		/* Intel VMX might give us the length of the instruction. */
