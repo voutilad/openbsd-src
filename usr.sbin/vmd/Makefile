@@ -13,7 +13,7 @@ SRCS+=		mmio.c
 SRCS+=		i8253.c i8259.c fw_cfg.c loadfile_elf.c mc146818.c ns8250.c
 SRCS+=		x86_vm.c x86_mmio.c
 SRCS+=		psp.c sev.c
-SRCS+=		i82093aa.c
+SRCS+=		i82093aa.c i82489dx.c
 .endif # amd64
 .if ${MACHINE} == "arm64"
 SRCS+=		arm64_vm.c

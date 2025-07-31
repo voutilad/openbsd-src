@@ -32,13 +32,14 @@
 
 #include <uvm/uvm_extern.h>
 
-#include <machine/fpu.h>
-#include <machine/pmap.h>
 #include <machine/biosvar.h>
-#include <machine/segments.h>
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
 #include <machine/ghcb.h>
+#include <machine/i82489reg.h>
+#include <machine/fpu.h>
+#include <machine/pmap.h>
+#include <machine/segments.h>
 #include <machine/vmmvar.h>
 
 #include <dev/isa/isareg.h>
@@ -5875,9 +5876,14 @@ vmx_handle_rdmsr(struct vcpu *vcpu)
 		*rax = (vcpu->vc_shadow_pat & 0xFFFFFFFFULL);
 		*rdx = (vcpu->vc_shadow_pat >> 32);
 		break;
+	case MSR_APICBASE:
+		/* XXX This needs to go to vmd, hardcode for now. */
+		*rax = LAPIC_BASE | (1ULL << 11) | (1ULL << 8);
+		*rdx = 0;
+		break;
 	default:
 		/* Unsupported MSRs causes #GP exception, don't advance %rip */
-		DPRINTF("%s: unsupported rdmsr (msr=0x%llx), injecting #GP\n",
+		printf("%s: unsupported rdmsr (msr=0x%llx), injecting #GP\n",
 		    __func__, *rcx);
 		ret = vmm_inject_gp(vcpu);
 		return (ret);
@@ -6186,12 +6192,17 @@ svm_handle_msr(struct vcpu *vcpu)
 			*rax = DE_CFG_SERIALIZE_LFENCE;
 			*rdx = 0;
 			break;
+		case MSR_APICBASE:
+			/* XXX This needs to go to vmd, hardcode for now. */
+			*rax = LAPIC_BASE | (1ULL << 11) | (1ULL << 8);
+			*rdx = 0;
+			break;
 		default:
 			/*
 			 * Unsupported MSRs causes #GP exception, don't advance
 			 * %rip
 			 */
-			DPRINTF("%s: unsupported rdmsr (msr=0x%llx), "
+			printf("%s: unsupported rdmsr (msr=0x%llx), "
 			    "injecting #GP\n", __func__, *rcx);
 			ret = vmm_inject_gp(vcpu);
 			return (ret);

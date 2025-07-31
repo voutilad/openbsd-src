@@ -991,38 +991,37 @@ static int
 emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 {
 	int ret;
-	uint64_t va;
-	uint64_t pa;
+	uint64_t gpa, data;
+	mmio_dev_fn_t mmio_fn;
 
 	log_warnx("%s: entered", __func__);
 
 	switch (insn->insn_opcode.op_encoding) {
 	case OP_ENC_FD:
-	case OP_ENC_MR:
-
-		va = insn->insn_gva;
-		ret = translate_gva(exit, va, &pa, PROT_READ);
-		if (ret) {
-			log_warnx("%s: VA translation failed for gva 0x%llx",
-			    __func__, va);
-			return -1;
-		}
-		log_debug("%s: mov from gva 0x%llx (gpa 0x%llx) -> reg %d",
-		    __func__, va, pa, insn->insn_reg);
-
-		exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
-		break;
 	case OP_ENC_RM:
-		va = insn->insn_gva;
-		ret = translate_gva(exit, va, &pa, PROT_WRITE);
-		if (ret) {
-			log_warnx("%s: VA translation failed for gva 0x%llx",
-			    __func__, va);
-			return -1;
+		log_warnx("%s: read from gva 0x%lx to %s", __func__,
+		    insn->insn_gva, str_reg(insn->insn_reg));
+		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_READ);
+		if (ret)
+			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		log_warnx("%s: gva 0x%lx translated to gpa 0x%llx", __func__,
+		    insn->insn_gva, gpa);
+		mmio_fn = mmio_find_dev(gpa);
+		if (mmio_fn) {
+			data = exit->vrs.vrs_gprs[insn->insn_reg];
+			ret = mmio_fn(MMIO_DIR_READ, &gpa, &data);
+			if (!ret) {
+				log_warnx("%s: setting %s=0x%llx", __func__,
+				    str_reg(insn->insn_reg), data);
+			} else {
+				log_warnx("%s: mmio function indicated failure",
+				    __func__);
+			}
+		} else {
+			log_warnx("%s: no mmio fn for gpa 0x%llx", __func__,
+			    gpa);
 		}
-		log_debug("%s: mov from reg %d -> gva 0x%llx (gpa 0x%llx)",
-		    __func__, insn->insn_reg, va, pa);
-		break;
+		return (0);
 	default:
 		log_warnx("%s: unsupported encoding %s", __func__,
 		    str_operand_enc(&insn->insn_opcode));

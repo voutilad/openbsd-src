@@ -37,6 +37,7 @@
 #include "i8253.h"
 #include "i8259.h"
 #include "i82093aa.h"
+#include "i82489dx.h"
 #include "loadfile.h"
 #include "mc146818.h"
 #include "ns8250.h"
@@ -421,6 +422,7 @@ init_emulated_hw(struct vmop_create_params *vmc, int child_cdrom,
 	mmio_init();
 
 	i82093aa_init();
+	i82489dx_init();
 
 	/* Initialize virtio devices */
 	virtio_init(current_vm, child_cdrom, child_disks, child_taps);
@@ -1101,7 +1103,7 @@ get_input_data(struct vm_exit *vei, uint32_t *data)
  *  0: the address was successfully translated - 'pa' contains the physical
  *     address currently mapped by 'va'.
  *  EFAULT: the PTE for 'VA' is unmapped. A #PF will be injected in this case
- *     and %cr2 set in the vcpu structure.
+ *     and %cr2 set in the vcpu structure. The caller must do these things.
  *  EINVAL: an error occurred reading paging table structures
  */
 int
