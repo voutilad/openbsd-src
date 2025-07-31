@@ -518,7 +518,6 @@ struct vm_rwregs_params {
  *  direct cache access (CPUIDECX_DCA)
  *  x2APIC (CPUIDECX_X2APIC)
  *  apic deadline (CPUIDECX_DEADLINE)
- *  apic (CPUID_APIC)
  *  psn (CPUID_PSN)
  *  self snoop (CPUID_SS)
  *  hyperthreading (CPUID_HTT)
@@ -533,7 +532,7 @@ struct vm_rwregs_params {
     CPUIDECX_DCA | CPUIDECX_X2APIC | CPUIDECX_DEADLINE)
 #define VMM_ECPUIDECX_MASK ~(CPUIDECX_SVM | CPUIDECX_MWAITX)
 #define VMM_CPUIDEDX_MASK ~(CPUID_ACPI | CPUID_TM | \
-    CPUID_HTT | CPUID_DS | CPUID_APIC | \
+    CPUID_HTT | CPUID_DS | \
     CPUID_PSN | CPUID_SS | CPUID_PBE | \
     CPUID_MTRR | CPUID_MCE | CPUID_MCA)
 #define VMM_AMDSPEC_EBX_MASK ~(CPUIDEBX_IBPB | CPUIDEBX_IBRS | \
