@@ -23,6 +23,7 @@
 
 #include "vmd.h"
 #include "mmio.h"
+#include "pci.h"
 #include "x86_mmio.h"
 #include "x86_vm.h"
 
@@ -63,6 +64,8 @@ static enum decode_result decode_sib(struct x86_decode_state *,
     struct x86_insn *);
 static enum decode_result decode_imm(struct x86_decode_state *,
     struct x86_insn *);
+
+static int mmio_valid_addr(uint64_t);
 
 static enum decode_result peek_byte(struct x86_decode_state *, uint8_t *);
 static enum decode_result next_byte(struct x86_decode_state *, uint8_t *);
@@ -122,6 +125,13 @@ const enum x86_operand_enc x86_2byte_operand_enc_table[255] = {
 	[0xB6] = OP_ENC_RM,
 	[0xB7] = OP_ENC_RM,
 };
+
+static int
+mmio_valid_addr(uint64_t gpa)
+{
+	return ((gpa >= PCI_MMIO_BAR_BASE) &&
+	    (gpa <= PCI_MMIO_BAR_END));
+}
 
 /*
  * peek_byte
@@ -1004,6 +1014,9 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_READ);
 		if (ret)
 			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (!mmio_valid_addr(gpa))
+			fatalx("invalid mmio gpa 0x%llx", gpa);
+
 		log_warnx("%s: gva 0x%lx translated to gpa 0x%llx", __func__,
 		    insn->insn_gva, gpa);
 		mmio_fn = mmio_find_dev(gpa);
