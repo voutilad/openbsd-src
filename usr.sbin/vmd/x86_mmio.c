@@ -57,9 +57,9 @@ static enum decode_result decode_opcode(struct x86_decode_state *,
 static enum decode_result decode_modrm(struct x86_decode_state *,
     struct x86_insn *);
 static int get_modrm_reg(struct x86_insn *);
-static int get_modrm_addr(struct x86_insn *, struct vcpu_reg_state *vrs);
+static int get_modrm_addr(struct x86_insn *, struct vcpu_reg_state *);
 static enum decode_result decode_disp(struct x86_decode_state *,
-    struct x86_insn *);
+    struct vcpu_reg_state *, struct x86_insn *);
 static enum decode_result decode_sib(struct x86_decode_state *,
     struct x86_insn *);
 static enum decode_result decode_imm(struct x86_decode_state *,
@@ -610,7 +610,8 @@ get_modrm_addr(struct x86_insn *insn, struct vcpu_reg_state *vrs)
 }
 
 static enum decode_result
-decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
+decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
+    struct x86_insn *insn)
 {
 	enum decode_result res = DECODE_ERROR;
 	uint64_t disp = 0;
@@ -650,8 +651,8 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		return (DECODE_ERROR);
 	}
 
-	switch (insn->insn_modrm) {
-	case 0x3D:
+	/* Disp32 / %rip + Disp32 displacement */
+	if ((insn->insn_modrm & 0x7) == 0x5) {
 		res = next_value(state, 4, &disp);
 		if (res == DECODE_ERROR) {
 			log_warnx("%s: decode error in Disp32 processing",
@@ -660,9 +661,19 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		}
 		insn->insn_disp = disp;
 		insn->insn_disp_type = DISP_4;
+		if (insn->insn_cpu_mode == VMM_CPU_MODE_LONG) {
+			insn->insn_disp += vrs->vrs_gprs[VCPU_REGS_RIP];
+
+			/*
+			 * we dont yet know how long the instructions is
+			 * so defer adding the fixup based on %rip until
+			 * we do (at the end of insn_decode()
+			 */
+			insn->insn_needs_rip_fixup = 1;
+		}
+
+		insn->insn_gva = insn->insn_disp;
 		return (res);
-	default:
-		break;
 	}
 
 	log_warnx("%s: mod = %d\n", __func__, MODRM_MOD(insn->insn_modrm));
@@ -959,7 +970,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 #endif
 
 	/* Process any Displacement bytes. */
-	res = decode_disp(&state, insn);
+	res = decode_disp(&state, vrs, insn);
 	if (res == DECODE_ERROR) {
 		log_warnx("%s: error decoding displacement", __func__);
 		goto err;
@@ -975,6 +986,11 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 
 done:
 	insn->insn_bytes_len = state.s_idx;
+
+	if (insn->insn_needs_rip_fixup) {
+		insn->insn_gva += insn->insn_bytes_len;
+		insn->insn_disp += insn->insn_disp;
+	}
 
 #ifdef MMIO_DEBUG
 	log_info("%s: final instruction length is %u", __func__,
@@ -1008,8 +1024,8 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 	log_warnx("%s: entered", __func__);
 
 	switch (insn->insn_opcode.op_encoding) {
-	case OP_ENC_FD:
-	case OP_ENC_RM:
+	case OP_ENC_FD:		/* Read: From displacement */
+	case OP_ENC_MR:		/* Read: mem->reg */
 		log_warnx("%s: read from gva 0x%lx to %s", __func__,
 		    insn->insn_gva, str_reg(insn->insn_reg));
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_READ);

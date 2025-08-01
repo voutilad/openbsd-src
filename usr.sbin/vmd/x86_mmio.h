@@ -140,6 +140,8 @@ struct x86_insn {
 
 	uint64_t		insn_immediate;		/* Immediate data */
 	uint8_t			insn_immediate_len;
+
+	int			insn_needs_rip_fixup;
 };
 
 int	insn_decode(struct vm_exit *, struct x86_insn *);
