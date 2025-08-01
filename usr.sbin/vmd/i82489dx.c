@@ -25,6 +25,7 @@
 struct i82489dx {
 	uint64_t	base;
 	uint32_t	ver;
+	uint32_t	tpr;
 };
 
 /* XXX will need one per cpu, which entails a per-vcpu init loop in x86_vm.c
@@ -34,6 +35,8 @@ struct i82489dx {
 struct i82489dx		lapic;
 
 uint32_t i82489_get_version(void);
+uint32_t i82489_get_tpr(void);
+void i82489_set_tpr(uint32_t);
 
 uint32_t
 i82489_get_version(void)
@@ -43,10 +46,27 @@ i82489_get_version(void)
 	return lapic.ver;
 }
 
+uint32_t
+i82489_get_tpr(void)
+{
+	log_warnx("%s: returning 0x%x", __func__, lapic.tpr);
+
+	return lapic.tpr;
+}
+
+void
+i82489_set_tpr(uint32_t tpr)
+{
+	log_warnx("%s: setting tpr=0x%x", __func__, tpr);
+
+	lapic.tpr = tpr;
+}
+
 int
 i82489dx_mmio(int dir, paddr_t addr, uint64_t *data)
 {
 	uint16_t reg;
+	uint32_t d;
 
 	log_warnx("%s: dir=%d addr=0x%lx data=0x%llx", __func__, dir, addr,
 	    *data);
@@ -67,6 +87,20 @@ i82489dx_mmio(int dir, paddr_t addr, uint64_t *data)
 		} else {
 			log_warnx("%s: write to reg 0x%x discarded", __func__,
 			    reg);
+		}
+		break;
+	case LAPIC_TPRI:
+		if (dir == MMIO_DIR_READ) {
+			*data &= 0xFFFFFFFF00000000;
+			*data |= i82489_get_tpr();
+			log_warnx("%s: read LAPIC_TPR: return 0x%llx",
+			    __func__, *data);
+		} else {
+			d = (uint32_t)(*data);
+
+			log_warnx("%s: setting LAPIC_TPR=0x%x",
+			    __func__, d);
+			i82489_set_tpr(d);
 		}
 		break;
 	default:
