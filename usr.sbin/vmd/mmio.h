@@ -25,7 +25,7 @@
 #define MMIO_DIR_READ 0
 #define MMIO_DIR_WRITE 1
 
-typedef int (*mmio_dev_fn_t)(int dir, uint64_t *addr, uint64_t *data);
+typedef int (*mmio_dev_fn_t)(int dir, uint64_t addr, uint64_t *data);
 
 struct mmio_dev {
 	paddr_t start;

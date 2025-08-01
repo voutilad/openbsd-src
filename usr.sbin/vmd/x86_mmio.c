@@ -1023,7 +1023,7 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		mmio_fn = mmio_find_dev(gpa);
 		if (mmio_fn) {
 			data = exit->vrs.vrs_gprs[insn->insn_reg];
-			ret = mmio_fn(MMIO_DIR_READ, &gpa, &data);
+			ret = mmio_fn(MMIO_DIR_READ, gpa, &data);
 			if (!ret) {
 				log_warnx("%s: setting %s=0x%llx", __func__,
 				    str_reg(insn->insn_reg), data);
