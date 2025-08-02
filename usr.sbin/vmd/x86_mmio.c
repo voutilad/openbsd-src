@@ -88,6 +88,7 @@ const enum x86_opcode_type x86_1byte_opcode_tbl[255] = {
 	[0xA1] = OP_MOV,
 	[0xA2] = OP_MOV,
 	[0xA3] = OP_MOV,
+	[0xC7] = OP_MOV,
 
 	/* MOVS */
 	[0xA4] = OP_UNSUPPORTED,
@@ -108,6 +109,7 @@ const enum x86_operand_enc x86_1byte_operand_enc_tbl[255] = {
 	[0xA1] = OP_ENC_FD,
 	[0xA2] = OP_ENC_TD,
 	[0xA3] = OP_ENC_TD,
+	[0xC7] = OP_ENC_MI,
 
 	/* MOVS */
 	[0xA4] = OP_ENC_ZO,
@@ -1015,17 +1017,34 @@ err:
 }
 
 static int
+get_operand_size(struct x86_insn *insn)
+{
+	if (insn->insn_cpu_mode == VMM_CPU_MODE_LONG) {
+		if (insn->insn_prefix.pfx_rex & REX_W)
+			return 8;
+		if (insn->insn_prefix.pfx_group3 == LEG_3_OPSZ)
+			return 2;
+		return 4;
+	} else if (insn->insn_cpu_mode == VMM_CPU_MODE_PROT32) {
+		if (insn->insn_prefix.pfx_group3 == LEG_3_OPSZ)
+			return 2;
+		return 4;
+	}
+	return 2;
+}
+
+static int
 emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 {
-	int ret;
-	uint64_t gpa, data;
+	int ret, opsz;
+	uint64_t gpa, data, mask;
 	mmio_dev_fn_t mmio_fn;
 
 	log_warnx("%s: entered", __func__);
 
 	switch (insn->insn_opcode.op_encoding) {
 	case OP_ENC_FD:		/* Read: From displacement */
-	case OP_ENC_MR:		/* Read: mem->reg */
+	case OP_ENC_RM:		/* Read: mem->reg */
 		log_warnx("%s: read from gva 0x%lx to %s", __func__,
 		    insn->insn_gva, str_reg(insn->insn_reg));
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_READ);
@@ -1037,12 +1056,80 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		log_warnx("%s: gva 0x%lx translated to gpa 0x%llx", __func__,
 		    insn->insn_gva, gpa);
 		mmio_fn = mmio_find_dev(gpa);
+		if (!mmio_fn) {
+			log_warnx("%s: no mmio fn for gpa 0x%llx", __func__,
+			    gpa);
+			return 0;
+		}
+		data = 0;
+		opsz = get_operand_size(insn);
+		switch (opsz) {
+		case 2: mask = 0xFFFFFFFFFFFF0000; break;
+		case 4: mask = 0xFFFFFFFF00000000; break;
+		case 8: mask = 0; break;
+		}
+
+		log_warnx("%s: reading %d bytes to %s, prior value "
+		    "0x%llx", __func__, opsz, str_reg(insn->insn_reg),
+		    exit->vrs.vrs_gprs[insn->insn_reg]);
+
+		ret = mmio_fn(MMIO_DIR_READ, gpa, &data);
+		if (!ret) {
+			exit->vrs.vrs_gprs[insn->insn_reg] &= mask;
+			exit->vrs.vrs_gprs[insn->insn_reg] |= data;
+			log_warnx("%s: set %s=0x%llx", __func__,
+			    str_reg(insn->insn_reg),
+			    exit->vrs.vrs_gprs[insn->insn_reg]);
+		} else {
+			log_warnx("%s: mmio function indicated failure",
+			    __func__);
+		}
+		return (0);
+	case OP_ENC_TD:		/* Write: To displacement */
+	case OP_ENC_MR:		/* Write: reg->mem */
+		log_warnx("%s: write to gva 0x%lx to %s", __func__,
+		    insn->insn_gva, str_reg(insn->insn_reg));
+		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_WRITE);
+		if (ret)
+			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (!mmio_valid_addr(gpa))
+			fatalx("invalid mmio gpa 0x%llx", gpa);
+
+		log_warnx("%s: gva 0x%lx translated to gpa 0x%llx", __func__,
+		    insn->insn_gva, gpa);
+		mmio_fn = mmio_find_dev(gpa);
 		if (mmio_fn) {
 			data = exit->vrs.vrs_gprs[insn->insn_reg];
-			ret = mmio_fn(MMIO_DIR_READ, gpa, &data);
+			log_warnx("%s: write 0x%llx to mmio addr 0x%llx",
+			    __func__, data, gpa);
+			ret = mmio_fn(MMIO_DIR_WRITE, gpa, &data);
+			if (ret) {
+				log_warnx("%s: mmio function indicated failure",
+				    __func__);
+			}
+		} else {
+			log_warnx("%s: no mmio fn for gpa 0x%llx", __func__,
+			    gpa);
+		}
+		return (0);
+	case OP_ENC_MI:		/* Write: immediate to mem */
+		log_warnx("%s: write immediate 0x%llx to gva 0x%lx", __func__,
+		    insn->insn_immediate, insn->insn_gva);
+		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_WRITE);
+		if (ret)
+			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (!mmio_valid_addr(gpa))
+			fatalx("invalid mmio gpa 0x%llx", gpa);
+
+		log_warnx("%s: gva 0x%lx translated to gpa 0x%llx", __func__,
+		    insn->insn_gva, gpa);
+		mmio_fn = mmio_find_dev(gpa);
+		if (mmio_fn) {
+			data = insn->insn_immediate;
+			ret = mmio_fn(MMIO_DIR_WRITE, gpa, &data);
 			if (!ret) {
-				log_warnx("%s: setting %s=0x%llx", __func__,
-				    str_reg(insn->insn_reg), data);
+				log_warnx("%s: wrote immediate value 0x%llx to memory", __func__,
+				    data);
 			} else {
 				log_warnx("%s: mmio function indicated failure",
 				    __func__);
