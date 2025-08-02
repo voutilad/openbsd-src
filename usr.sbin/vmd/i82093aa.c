@@ -21,12 +21,80 @@
 #include "i82093aa.h"
 #include "mmio.h"
 #include "vmd.h"
+#include "x86_mmio.h"
+
+struct i82093aa {
+	uint32_t	reg;
+	uint32_t	win;
+
+	uint32_t	id;
+};
+
+struct i82093aa		ioapic;
+
+static void
+i82093aa_winop(int dir, uint64_t *data)
+{
+	uint32_t d;
+
+	if (dir == MMIO_DIR_READ) {
+		log_warnx("%s: requested read from register 0x%x", __func__,
+		    ioapic.reg);
+
+		d = 0;
+
+		switch (ioapic.reg) {
+		case IOAPIC_ID: d = ioapic.id; break;
+		case IOAPIC_VER: d = 0x170011; break;
+		default:
+			log_warnx("%s: unknown register id 0x%x", __func__,
+			    ioapic.reg);
+		}
+
+		*data &= 0xFFFFFFFF00000000ULL;
+		*data |= d;
+	} else if (dir == MMIO_DIR_WRITE) {
+		log_warnx("%s: requested write to register 0x%x, data=0x%x",
+		    __func__, ioapic.reg, (uint32_t)*data);
+	} else {
+		log_warnx("%s: impossible direction %d", __func__, dir);
+	}
+}
+
+static void
+i82093aa_regsel(int dir, uint64_t *data)
+{
+	uint64_t d;
+
+	log_warnx("%s: mmio op to register select (dir=%d)", __func__, dir);
+	if (dir == MMIO_DIR_READ) {
+		d = *data & 0xFFFFFFFF00000000ULL;
+		log_warnx("%s: returning 0x%x", __func__, ioapic.reg);
+		d |= ioapic.reg;
+		*data = d;
+	} else if (dir == MMIO_DIR_WRITE) {
+		log_warnx("%s: setting regwin = 0x%x", __func__,
+		    (uint32_t)*data);
+		ioapic.reg = (uint32_t)*data;
+	} else {
+		log_warnx("%s: impossible direction %d", __func__, dir);
+	}
+}
 
 int
-i82093aa_mmio(int dir, paddr_t addr, uint64_t data)
+i82093aa_mmio(int dir, paddr_t addr, uint64_t *data)
 {
-	log_debug("%s: dir=%d addr=0x%lx data=0x%llx", __func__, dir, addr,
-	    data);
+	log_warnx("%s: dir=%d addr=0x%lx data=0x%llx", __func__, dir, addr,
+	    *data);
+
+	if (addr == (IOAPIC_BASE_DEFAULT + IOAPIC_REG)) {
+		i82093aa_regsel(dir, data);
+	} else if (addr == (IOAPIC_BASE_DEFAULT + IOAPIC_DATA)) {
+		i82093aa_winop(dir, data);
+	} else {
+		log_warnx("%s: invalid i82093aa register @ 0x%lx", __func__,
+		    addr);
+	}
 
 	return 0;
 }

@@ -605,6 +605,8 @@ get_modrm_addr(struct x86_insn *insn, struct vcpu_reg_state *vrs)
 			break;
 		}
 
+		log_warnx("%s: computed register-based addr=0x%lx", __func__,
+		    addr);
 		insn->insn_gva = addr;
 	}
 
@@ -616,7 +618,7 @@ decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
     struct x86_insn *insn)
 {
 	enum decode_result res = DECODE_ERROR;
-	uint64_t disp = 0;
+	int64_t disp = 0;
 
 	if (!is_valid_state(state, __func__) || insn == NULL) {
 		log_warnx("%s: invalid state", __func__);
@@ -653,17 +655,27 @@ decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
 		return (DECODE_ERROR);
 	}
 
-	/* Disp32 / %rip + Disp32 displacement */
-	if ((insn->insn_modrm & 0x7) == 0x5) {
-		res = next_value(state, 4, &disp);
+	/* Disp8 / Disp32 / %rip + Disp32 displacement */
+	if (MODRM_RM(insn->insn_modrm) == 0x5) {
+		if (MODRM_MOD(insn->insn_modrm) == 1) {
+			/* Disp8 */
+			insn->insn_disp_type = DISP_1;
+			res = next_value(state, 1, &disp);
+		} else {
+			/* Disp32 */
+			insn->insn_disp_type = DISP_4;
+			res = next_value(state, 4, &disp);
+		}
+
 		if (res == DECODE_ERROR) {
 			log_warnx("%s: decode error in Disp32 processing",
 			    __func__);
 			return (res);
 		}
 		insn->insn_disp = disp;
-		insn->insn_disp_type = DISP_4;
-		if (insn->insn_cpu_mode == VMM_CPU_MODE_LONG) {
+
+		if (insn->insn_cpu_mode == VMM_CPU_MODE_LONG &&
+		    MODRM_MOD(insn->insn_modrm) == 0) {
 			insn->insn_disp += vrs->vrs_gprs[VCPU_REGS_RIP];
 
 			/*
@@ -672,9 +684,12 @@ decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
 			 * we do (at the end of insn_decode()
 			 */
 			insn->insn_needs_rip_fixup = 1;
+			insn->insn_gva += (int32_t)insn->insn_disp;
+			return (res);
 		}
 
-		insn->insn_gva = insn->insn_disp;
+		insn->insn_gva += insn->insn_disp;
+
 		return (res);
 	}
 
@@ -715,6 +730,8 @@ decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
 		res = DECODE_MORE;
 		log_warnx("%s: ?? DISP_NONE fallthrough", __func__);
 	}
+
+	insn->insn_gva += disp;
 
 	log_warnx("%s: returning calculated displacement of 0x%llx", __func__,
 	    insn->insn_disp);
@@ -1048,8 +1065,10 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		log_warnx("%s: read from gva 0x%lx to %s", __func__,
 		    insn->insn_gva, str_reg(insn->insn_reg));
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_READ);
-		if (ret)
-			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (ret) {
+			log_warnx("error translating gva 0x%lx", insn->insn_gva);
+			return 0;
+		}
 		if (!mmio_valid_addr(gpa))
 			fatalx("invalid mmio gpa 0x%llx", gpa);
 

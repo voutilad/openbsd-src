@@ -22,6 +22,6 @@
 #include <sys/types.h>
 
 void i82093aa_init(void);
-int i82093aa_mmio(int, paddr_t, uint64_t);
+int i82093aa_mmio(int, paddr_t, uint64_t *);
 
 #endif /* !_I82093AA_H_ */
