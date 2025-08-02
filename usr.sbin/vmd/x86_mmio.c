@@ -1109,8 +1109,10 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		log_warnx("%s: write to gva 0x%lx to %s", __func__,
 		    insn->insn_gva, str_reg(insn->insn_reg));
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_WRITE);
-		if (ret)
-			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (ret) {
+			log_warnx("error translating gva 0x%lx", insn->insn_gva);
+			return (0);
+		}
 		if (!mmio_valid_addr(gpa))
 			fatalx("invalid mmio gpa 0x%llx", gpa);
 
@@ -1135,8 +1137,10 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 		log_warnx("%s: write immediate 0x%llx to gva 0x%lx", __func__,
 		    insn->insn_immediate, insn->insn_gva);
 		ret = translate_gva(exit, insn->insn_gva, &gpa, PROT_WRITE);
-		if (ret)
-			fatalx("error translating gva 0x%lx", insn->insn_gva);
+		if (ret) {
+			log_warnx("error translating gva 0x%lx", insn->insn_gva);
+			return (0);
+		}
 		if (!mmio_valid_addr(gpa))
 			fatalx("invalid mmio gpa 0x%llx", gpa);
 
