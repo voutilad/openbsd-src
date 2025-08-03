@@ -516,6 +516,8 @@ decode_modrm(struct x86_decode_state *state, struct x86_insn *insn)
 	default:
 		/* Peek to see if we're done decode. */
 		res = peek_byte(state, NULL);
+		log_warnx("%s: decoding modrm res=%s", __func__,
+		    str_decode_res(res));
 	}
 
 	return (res);
@@ -625,7 +627,8 @@ decode_disp(struct x86_decode_state *state, struct vcpu_reg_state *vrs,
 		return (DECODE_ERROR);
 	}
 
-	if (insn->insn_opcode.op_encoding == OP_ENC_FD) {
+	if (insn->insn_opcode.op_encoding == OP_ENC_FD ||
+	    insn->insn_opcode.op_encoding == OP_ENC_TD) {
 		/* XXX rex prefix override needs handling here */
 		/*     cannot count on processor mode to determine */
 		/*     op size */
