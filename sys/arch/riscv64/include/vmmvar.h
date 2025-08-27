@@ -23,13 +23,17 @@
 
 #define VMM_HV_SIGNATURE 	"OpenBSDVMM58"
 
-#ifdef _KERNEL
+/* Exit Reasons */
+#define VM_EXIT_TERMINATED			0xFFFE
+#define VM_EXIT_NONE				0xFFFF
 
 enum {
 	VMM_MODE_UNKNOWN,
 	VMM_MODE_CLASSIC,
 	VMM_MODE_HMODE,
 };
+
+#define VCPU_REGS_NGPRS		31
 
 /*
  * Virtual Machine
@@ -40,7 +44,38 @@ struct vm_create_params;
 struct vmm_softc_md {
 };
 
+/*
+ * struct vcpu_inject_event     : describes an exception or interrupt to inject.
+ */
+struct vcpu_inject_event {
+	uint8_t		vie_vector;     /* Exception or interrupt vector. */
+	uint32_t	vie_errorcode;  /* Optional error code. */
+	uint8_t		vie_type;
+#define VCPU_INJECT_NONE	0
+#define VCPU_INJECT_INTR	1       /* External hardware interrupt. */
+#define VCPU_INJECT_EX		2       /* HW or SW Exception */
+#define VCPU_INJECT_NMI		3       /* Non-maskable Interrupt */
+};
+
 struct vcpu_reg_state {
+	uint64_t		vrs_gprs[VCPU_REGS_NGPRS];
+};
+
+/*
+ * struct vm_exit
+ *
+ * Contains VM exit information communicated to vmd(8). This information is
+ * gathered by vmm(4) from the CPU on each exit that requires help from vmd.
+ */
+struct vm_exit {
+	struct vcpu_reg_state		vrs;
+};
+
+struct vm_intr_params {
+	/* Input parameters to VMM_IOC_INTR */
+	uint32_t		vip_vm_id;
+	uint32_t		vip_vcpu_id;
+	uint16_t		vip_intr;
 };
 
 /*
@@ -72,8 +107,8 @@ SLIST_HEAD(vcpu_head, vcpu);
 struct vm_rwregs_params {
 };
 
-struct vcpu_inject_event {
-};
+/* IOCTL definitions */
+#define VMM_IOC_INTR _IOW('V', 6, struct vm_intr_params) /* Intr pending */
 
 void	vmm_attach_machdep(struct device *, struct device *, void *);
 void	vmm_activate_machdep(struct device *, int);
@@ -86,7 +121,5 @@ int	vcpu_reset_regs(struct vcpu *, struct vcpu_reg_state *);
 int	vm_rwregs(struct vm_rwregs_params *, int);
 int	vmm_start(void);
 int	vmm_stop(void);
-
-#endif /* _KERNEL */
 
 #endif /* ! _MACHINE_VMMVAR_H_ */
