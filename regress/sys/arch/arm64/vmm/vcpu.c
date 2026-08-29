@@ -33,11 +33,14 @@
 
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_RESULT	0x42
+#define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
+#define FAULT_GPA	GUEST_MEM_SIZE
+#define HPFAR_FIPA_MASK	0xfffffffff0UL
 
-/* mov x0, #GUEST_RESULT; hvc #0; b . */
+/* mov x0, #GUEST_RESULT; ldr x2, [x1]; b . */
 static const uint32_t guest_code[] = {
 	0xd2800840,
-	0xd4000002,
+	0xf9400022,
 	0x14000000,
 };
 
@@ -61,7 +64,7 @@ main(void)
 	vcp.vcp_ncpus = 1;
 	vcp.vcp_nmemranges = 1;
 	vcp.vcp_memranges[0].vmr_gpa = 0;
-	vcp.vcp_memranges[0].vmr_size = PAGE_SIZE;
+	vcp.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
 	if (ioctl(fd, VMM_IOC_CREATE, &vcp) == -1)
 		err(1, "VMM_IOC_CREATE");
 
@@ -82,6 +85,7 @@ main(void)
 	reset.vrp_vcpu_id = 0;
 	reset.vrp_init_state.vrs_pc = 0;
 	reset.vrp_init_state.vrs_sp = PAGE_SIZE;
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X1] = FAULT_GPA;
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
 	reset.vrp_init_state.vrs_sctlr_el1 = SCTLR_RES1;
@@ -102,14 +106,14 @@ main(void)
 		goto out_free;
 	}
 
-	if (run.vrp_exit_reason != VM_EXIT_HVC) {
+	if (run.vrp_exit_reason != VM_EXIT_EXCEPTION) {
 		warnx("unexpected exit reason 0x%04x: esr=0x%llx "
 		    "far=0x%llx hpfar=0x%llx pc=0x%llx",
 		    run.vrp_exit_reason, exit->vesr, exit->vfar,
 		    exit->vhpfar, exit->vrs.vrs_pc);
 		goto out_free;
 	}
-	if (ESR_ELx_EXCEPTION(exit->vesr) != 0x16) {
+	if (ESR_ELx_EXCEPTION(exit->vesr) != 0x24) {
 		warnx("unexpected ESR_EL2 0x%llx", exit->vesr);
 		goto out_free;
 	}
@@ -118,12 +122,18 @@ main(void)
 		    exit->vrs.vrs_gprs[VCPU_REGS_X0]);
 		goto out_free;
 	}
-	if (exit->vrs.vrs_pc != 2 * sizeof(uint32_t)) {
+	if (exit->vrs.vrs_pc != sizeof(uint32_t)) {
 		warnx("unexpected pc 0x%llx", exit->vrs.vrs_pc);
 		goto out_free;
 	}
+	if (((exit->vhpfar & HPFAR_FIPA_MASK) << 8 |
+	    (exit->vfar & PAGE_MASK)) != FAULT_GPA) {
+		warnx("unexpected fault address: far=0x%llx hpfar=0x%llx",
+		    exit->vfar, exit->vhpfar);
+		goto out_free;
+	}
 
-	printf("vcpu exited through HVC with x0=0x%llx pc=0x%llx\n",
+	printf("vcpu exited on stage-2 fault with x0=0x%llx pc=0x%llx\n",
 	    exit->vrs.vrs_gprs[VCPU_REGS_X0], exit->vrs.vrs_pc);
 	ret = 0;
 
