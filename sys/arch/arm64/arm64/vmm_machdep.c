@@ -26,6 +26,7 @@
 #include <uvm/uvm_extern.h>
 
 #include <machine/armreg.h>
+#include <machine/cpufunc.h>
 #include <machine/cpu.h>
 #include <machine/hypervisor.h>
 #include <machine/pmap.h>
@@ -48,8 +49,10 @@
 	VTCR_SL0_L1 | VTCR_T0SZ_39)
 
 #define HPFAR_FIPA_MASK		0xfffffffff0UL
+#define VTTBR_VMID_SHIFT	48
 
-int	arm64_vmm_enter(paddr_t);
+int	arm64_vmm_enter_nvhe(paddr_t);
+int	arm64_vmm_enter_vhe(vaddr_t);
 
 static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_memtype(struct vm *, paddr_t);
@@ -83,7 +86,7 @@ vmm_attach_machdep(struct device *parent, struct device *self, void *aux)
 	sc->mode = VMM_MODE_STAGE2;
 	sc->max_vpid = 0;
 	rw_init(&sc->vpid_lock, "vpid");
-	printf(": EL2/stage-2");
+	printf(": EL2/%s stage-2", arm64_has_el2 == 2 ? "VHE" : "nVHE");
 }
 
 void
@@ -281,6 +284,9 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 			return (EFAULT);
 	}
 
+	/* Stage-2 instruction fetches require the page clean to PoC. */
+	cpu_idcache_wbinv_range(hva, PAGE_SIZE);
+
 	return (pmap_enter(vcpu->vc_parent->vm_pmap, ipa, hpa,
 	    PROT_READ | PROT_WRITE | PROT_EXEC,
 	    PROT_READ | PROT_WRITE | PROT_EXEC));
@@ -305,10 +311,13 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	run->avr_contextidr_el1 = vrs->vrs_contextidr_el1;
 	run->avr_cpacr_el1 = vrs->vrs_cpacr_el1;
 	run->avr_tpidr_el1 = vrs->vrs_tpidr_el1;
-	run->avr_vttbr_el2 = vcpu->vc_parent->vm_pmap->pm_pt0pa;
+	run->avr_vttbr_el2 = vcpu->vc_parent->vm_pmap->pm_pt0pa |
+	    ((uint64_t)(vcpu->vc_parent->vm_id & 0xff) << VTTBR_VMID_SHIFT);
 	run->avr_vtcr_el2 = VTCR_STAGE2_39;
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK;
+	if (arm64_has_el2 == 2)
+		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_cntvoff_el2 = 0;
 }
 
@@ -343,9 +352,9 @@ vm_run(struct vm_run_params *vrp)
 	struct arm64_vmm_run *run;
 	struct vm *vm;
 	struct vcpu *vcpu;
-	paddr_t ipa;
+	paddr_t ipa, last_ipa = (paddr_t)-1;
 	uint64_t ec;
-	u_int old;
+	u_int old, retries = 0;
 	int error = 0;
 
 	error = vm_find(vrp->vrp_vm_id, &vm);
@@ -375,13 +384,25 @@ vm_run(struct vm_run_params *vrp)
 	WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 	for (;;) {
 		arm64_vmm_load_run(vcpu);
-		arm64_vmm_enter(vcpu->vc_control_pa);
+		if (arm64_has_el2 == 2)
+			arm64_vmm_enter_vhe(vcpu->vc_control_va);
+		else
+			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
 		arm64_vmm_save_run(vcpu);
 		ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
 
 		if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L) {
 			ipa = ((run->avr_hpfar_el2 & HPFAR_FIPA_MASK) << 8) |
 			    (run->avr_far_el2 & PAGE_MASK);
+			if (ipa == last_ipa) {
+				if (++retries > 4) {
+					vrp->vrp_exit_reason = VM_EXIT_EXCEPTION;
+					break;
+				}
+			} else {
+				last_ipa = ipa;
+				retries = 0;
+			}
 			error = arm64_vmm_fault_page(vcpu, ipa);
 			if (error == 0)
 				continue;

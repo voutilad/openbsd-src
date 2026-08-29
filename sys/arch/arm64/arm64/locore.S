@@ -77,6 +77,13 @@ drop_to_el1:
 	cmp	x2, #2
 	b.ne	3f
 
+#if NVMM > 0
+	/* The kernel will retain EL2 in VHE host mode. */
+	adrp	x3, arm64_has_el2
+	add	x3, x3, :lo12:arm64_has_el2
+	mov	w4, #2
+	str	w4, [x3]
+#endif
 	mov	x2, #HCR_E2H
 	orr	x2, x2, #HCR_TGE
 	msr	hcr_el2, x2
@@ -168,6 +175,7 @@ drop_to_el1:
 #endif
 
 	.align 11
+	.globl hyp_vectors
 hyp_vectors:
 	VECT_EMPTY	/* Synchronous EL2t */
 	VECT_EMPTY	/* IRQ EL2t */
