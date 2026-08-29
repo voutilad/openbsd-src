@@ -1782,6 +1782,15 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 	pmap_t pm = pted->pted_pmap;
 	uint64_t attr = ATTR_nG;
 
+	if (pm->pm_type == PMAP_TYPE_STAGE2) {
+		/* Normal WB, inner-shareable, read/write, accessed, executable. */
+		pte = (pted->pted_pte & PTE_RPGN) | L3_P |
+		    (PTE_MEMATTR_WB << 2) | (3UL << 6) |
+		    ATTR_SH(SH_INNER) | ATTR_AF;
+		*pl3 = (pted->pted_pte & PROT_MASK) ? pte : 0;
+		return;
+	}
+
 	/* see mair in locore.S */
 	switch (pted->pted_va & PMAP_CACHE_BITS) {
 	case PMAP_CACHE_WB:
@@ -1821,6 +1830,15 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 
 	pte = (pted->pted_pte & PTE_RPGN) | attr | access_bits | L3_P;
 	*pl3 = access_bits ? pte : 0;
+}
+
+void
+pmap_convert(pmap_t pm, int type)
+{
+	KASSERT(pm != pmap_kernel());
+	KASSERT(pm->pm_stats.resident_count == 0);
+	KASSERT(type == PMAP_TYPE_STAGE2);
+	pm->pm_type = type;
 }
 
 void

@@ -28,6 +28,7 @@
  */
 
 #include "assym.h"
+#include "vmm.h"
 #include <sys/syscall.h>
 #include <machine/asm.h>
 #include <machine/armreg.h>
@@ -36,6 +37,14 @@
 #include <machine/param.h>
 
 #define	VIRT_BITS	39
+
+	.data
+	.align 2
+	.globl arm64_has_el2
+arm64_has_el2:
+	.word	0
+	.align	3
+	.text
 
 /*
  * If we are started in EL2, configure the required hypervisor
@@ -74,6 +83,13 @@ drop_to_el1:
 	isb
 	b	1b
 3:
+#if NVMM > 0
+	/* Remember that the kernel retained access to a non-VHE EL2. */
+	adrp	x3, arm64_has_el2
+	add	x3, x3, :lo12:arm64_has_el2
+	mov	w4, #1
+	str	w4, [x3]
+#endif
 	/* Configure the Hypervisor */
 	mov	x2, #(HCR_RW)
 	orr	x2, x2, #(HCR_API | HCR_APK)
@@ -143,6 +159,14 @@ drop_to_el1:
 	.align 7;	\
 	1:	b	1b
 
+#if NVMM > 0
+#define	VECT_VMM(label)	\
+	.align 7;	\
+	b	label
+#else
+#define	VECT_VMM(label)	VECT_EMPTY
+#endif
+
 	.align 11
 hyp_vectors:
 	VECT_EMPTY	/* Synchronous EL2t */
@@ -155,7 +179,7 @@ hyp_vectors:
 	VECT_EMPTY	/* FIQ EL2h */
 	VECT_EMPTY	/* Error EL2h */
 
-	VECT_EMPTY	/* Synchronous 64-bit EL1 */
+	VECT_VMM(vmm_hyp_sync)	/* Synchronous 64-bit EL1 */
 	VECT_EMPTY	/* IRQ 64-bit EL1 */
 	VECT_EMPTY	/* FIQ 64-bit EL1 */
 	VECT_EMPTY	/* Error 64-bit EL1 */

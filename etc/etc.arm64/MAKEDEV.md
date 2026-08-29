@@ -86,6 +86,7 @@ _DEV(uk, 20)
 _DEV(vi, 44)
 _DEV(vscsi, 89)
 _DEV(kstat, 51)
+_DEV(vmm, 10)
 dnl
 divert(__mddivert)dnl
 dnl

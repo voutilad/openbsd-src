@@ -23,10 +23,13 @@
 #include <sys/malloc.h>
 
 #include <machine/fdt.h>
+#include <machine/vmmvar.h>
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/ofw_thermal.h>
+
+#include "vmm.h"
 
 int mainbus_match(struct device *, void *, void *);
 void mainbus_attach(struct device *, struct device *, void *);
@@ -136,6 +139,13 @@ mainbus_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Attach secondary CPUs. */
 	mainbus_attach_cpus(self, mainbus_match_secondary);
+
+#if NVMM > 0
+	if (vmm_enabled()) {
+		const char *busname = "vmm";
+		config_found(self, &busname, NULL);
+	}
+#endif
 
 	mainbus_attach_firmware(self);
 	mainbus_attach_resvmem(self);

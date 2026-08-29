@@ -74,6 +74,14 @@ int	nblkdev = nitems(bdevsw);
 
 #define	mmread	mmrw
 #define	mmwrite	mmrw
+
+/* open, close, ioctl */
+#define cdev_vmm_init(c,n) { \
+	dev_init(c,n,open), dev_init(c,n,close), \
+	(dev_type_read((*))) enodev, (dev_type_write((*))) enodev, \
+	dev_init(c,n,ioctl), (dev_type_stop((*))) enodev, 0, \
+	(dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
+
 cdev_decl(mm);
 cdev_decl(wd);
 #include "bio.h"
@@ -100,6 +108,7 @@ cdev_decl(lpt);
 #include "ucom.h"
 #include "radio.h"
 #include "drm.h"
+#include "vmm.h"
 
 #include "wsdisplay.h"
 #include "wskbd.h"
@@ -134,7 +143,7 @@ struct cdevsw	cdevsw[] =
 	cdev_log_init(1,log),		/* 7: /dev/klog */
 	cdev_tty_init(NCOM,com),	/* 8: serial port */
 	cdev_notdef(),			/* 9: was floppy disk */
-	cdev_notdef(),			/* 10 */
+	cdev_vmm_init(NVMM,vmm),	/* 10: virtual machine monitor */
 	cdev_notdef(),			/* 11: Sony CD-ROM */
 	cdev_wsdisplay_init(NWSDISPLAY,	/* 12: frame buffers, etc. */
 	    wsdisplay),

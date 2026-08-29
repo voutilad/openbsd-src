@@ -24,6 +24,9 @@
 #define VMM_HV_SIGNATURE 	"OpenBSDVMM58"
 
 /* Exit Reasons */
+#define VM_EXIT_HVC				0x0001
+#define VM_EXIT_WFX				0x0002
+#define VM_EXIT_EXCEPTION			0x0003
 #define VM_EXIT_TERMINATED			0xFFFE
 #define VM_EXIT_NONE				0xFFFF
 
@@ -47,8 +50,52 @@ struct vcpu_inject_event {
 
 #define VCPU_REGS_NGPRS		31
 
+#define VCPU_REGS_X0		0
+#define VCPU_REGS_X1		1
+#define VCPU_REGS_X2		2
+#define VCPU_REGS_X3		3
+#define VCPU_REGS_X4		4
+#define VCPU_REGS_X5		5
+#define VCPU_REGS_X6		6
+#define VCPU_REGS_X7		7
+#define VCPU_REGS_X8		8
+#define VCPU_REGS_X9		9
+#define VCPU_REGS_X10		10
+#define VCPU_REGS_X11		11
+#define VCPU_REGS_X12		12
+#define VCPU_REGS_X13		13
+#define VCPU_REGS_X14		14
+#define VCPU_REGS_X15		15
+#define VCPU_REGS_X16		16
+#define VCPU_REGS_X17		17
+#define VCPU_REGS_X18		18
+#define VCPU_REGS_X19		19
+#define VCPU_REGS_X20		20
+#define VCPU_REGS_X21		21
+#define VCPU_REGS_X22		22
+#define VCPU_REGS_X23		23
+#define VCPU_REGS_X24		24
+#define VCPU_REGS_X25		25
+#define VCPU_REGS_X26		26
+#define VCPU_REGS_X27		27
+#define VCPU_REGS_X28		28
+#define VCPU_REGS_X29		29
+#define VCPU_REGS_X30		30
+
 struct vcpu_reg_state {
 	uint64_t			vrs_gprs[VCPU_REGS_NGPRS];
+	uint64_t			vrs_sp;
+	uint64_t			vrs_pc;
+	uint64_t			vrs_pstate;
+	uint64_t			vrs_sctlr_el1;
+	uint64_t			vrs_tcr_el1;
+	uint64_t			vrs_ttbr0_el1;
+	uint64_t			vrs_ttbr1_el1;
+	uint64_t			vrs_mair_el1;
+	uint64_t			vrs_vbar_el1;
+	uint64_t			vrs_contextidr_el1;
+	uint64_t			vrs_cpacr_el1;
+	uint64_t			vrs_tpidr_el1;
 };
 
 /*
@@ -59,6 +106,9 @@ struct vcpu_reg_state {
  */
 struct vm_exit {
 	struct vcpu_reg_state		vrs;
+	uint64_t			vesr;
+	uint64_t			vfar;
+	uint64_t			vhpfar;
 };
 
 struct vm_intr_params {
@@ -87,5 +137,107 @@ enum {
 
 /* IOCTL definitions */
 #define VMM_IOC_INTR _IOW('V', 6, struct vm_intr_params) /* Intr pending */
+
+#ifdef _KERNEL
+
+#include <sys/queue.h>
+#include <sys/rwlock.h>
+
+enum {
+	VMM_MODE_UNKNOWN,
+	VMM_MODE_STAGE2
+};
+
+enum {
+	VMM_MEM_TYPE_REGULAR,
+	VMM_MEM_TYPE_MMIO,
+	VMM_MEM_TYPE_UNKNOWN
+};
+
+struct vm;
+struct vm_create_params;
+struct cpu_info;
+struct device;
+struct proc;
+
+/*
+ * State shared with the EL2 exception vectors.  This structure is allocated
+ * from a physically contiguous page because EL2 runs with its stage-1 MMU
+ * disabled.  Keep the assembly offsets in genassym.cf in sync.
+ */
+struct arm64_vmm_run {
+	uint64_t	avr_gprs[VCPU_REGS_NGPRS];
+	uint64_t	avr_sp;
+	uint64_t	avr_pc;
+	uint64_t	avr_pstate;
+	uint64_t	avr_sctlr_el1;
+	uint64_t	avr_tcr_el1;
+	uint64_t	avr_ttbr0_el1;
+	uint64_t	avr_ttbr1_el1;
+	uint64_t	avr_mair_el1;
+	uint64_t	avr_vbar_el1;
+	uint64_t	avr_contextidr_el1;
+	uint64_t	avr_cpacr_el1;
+	uint64_t	avr_tpidr_el1;
+
+	uint64_t	avr_esr_el2;
+	uint64_t	avr_far_el2;
+	uint64_t	avr_hpfar_el2;
+	uint64_t	avr_vttbr_el2;
+	uint64_t	avr_vtcr_el2;
+	uint64_t	avr_hcr_el2;
+	uint64_t	avr_vector;
+	uint64_t	avr_cntvoff_el2;
+
+	uint64_t	avr_host_sp;
+	uint64_t	avr_host_pc;
+	uint64_t	avr_host_pstate;
+	uint64_t	avr_host_sctlr_el1;
+	uint64_t	avr_host_tcr_el1;
+	uint64_t	avr_host_ttbr0_el1;
+	uint64_t	avr_host_ttbr1_el1;
+	uint64_t	avr_host_mair_el1;
+	uint64_t	avr_host_vbar_el1;
+	uint64_t	avr_host_contextidr_el1;
+	uint64_t	avr_host_cpacr_el1;
+	uint64_t	avr_host_tpidr_el1;
+	uint64_t	avr_host_cntvoff_el2;
+	uint64_t	avr_host_hcr_el2;
+};
+
+struct vcpu {
+	vaddr_t			vc_control_va;	/* [I] EL2 run page */
+	paddr_t			vc_control_pa;	/* [I] */
+	struct vm		*vc_parent;	/* [I] */
+	uint32_t		vc_id;		/* [I] */
+	u_int			vc_state;	/* [a] */
+	SLIST_ENTRY(vcpu)	vc_vcpu_link;	/* [V] */
+	uint8_t			vc_virt_mode;	/* [I] */
+	struct rwlock		vc_lock;
+	struct cpu_info		*vc_curcpu;	/* [a] */
+	struct vm_exit		vc_exit;	/* [v] */
+	struct vcpu_reg_state	vc_regs;	/* [v] */
+	struct vcpu_inject_event vc_inject;	/* [v] */
+};
+
+SLIST_HEAD(vcpu_head, vcpu);
+
+extern int arm64_has_el2;
+
+int	vmm_enabled(void);
+int	vmm_probe_machdep(struct device *, void *, void *);
+void	vmm_attach_machdep(struct device *, struct device *, void *);
+void	vmm_activate_machdep(struct device *, int);
+int	vmm_start(void);
+int	vmm_stop(void);
+int	pledge_ioctl_vmm_machdep(struct proc *, long);
+int	vm_impl_init(struct vm *, struct proc *);
+void	vm_impl_deinit(struct vm *);
+int	vcpu_init(struct vcpu *, struct vm_create_params *);
+void	vcpu_deinit(struct vcpu *);
+int	vcpu_reset_regs(struct vcpu *, struct vcpu_reg_state *);
+int	vm_rwregs(struct vm_rwregs_params *, int);
+
+#endif /* _KERNEL */
 
 #endif /* ! _MACHINE_VMMVAR_H_ */

@@ -38,6 +38,7 @@ include <machine/cpu.h>
 include <machine/intr.h>
 include <machine/frame.h>
 include <machine/pcb.h>
+include <machine/vmmvar.h>
 
 struct	sigframe
 member	sf_sc
@@ -80,3 +81,40 @@ member	sf_x25
 member	sf_x27
 member	sf_x29
 define	SWITCHFRAME_SZ sizeof(struct switchframe)
+
+struct	arm64_vmm_run
+member	avr_gprs
+member	avr_sp
+member	avr_pc
+member	avr_pstate
+member	avr_sctlr_el1
+member	avr_tcr_el1
+member	avr_ttbr0_el1
+member	avr_ttbr1_el1
+member	avr_mair_el1
+member	avr_vbar_el1
+member	avr_contextidr_el1
+member	avr_cpacr_el1
+member	avr_tpidr_el1
+member	avr_esr_el2
+member	avr_far_el2
+member	avr_hpfar_el2
+member	avr_vttbr_el2
+member	avr_vtcr_el2
+member	avr_hcr_el2
+member	avr_vector
+member	avr_cntvoff_el2
+member	avr_host_sp
+member	avr_host_pc
+member	avr_host_pstate
+member	avr_host_sctlr_el1
+member	avr_host_tcr_el1
+member	avr_host_ttbr0_el1
+member	avr_host_ttbr1_el1
+member	avr_host_mair_el1
+member	avr_host_vbar_el1
+member	avr_host_contextidr_el1
+member	avr_host_cpacr_el1
+member	avr_host_tpidr_el1
+member	avr_host_cntvoff_el2
+member	avr_host_hcr_el2

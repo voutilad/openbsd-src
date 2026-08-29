@@ -67,6 +67,9 @@ struct pmap {
 	uint64_t pm_asid;
 	uint64_t pm_guarded;
 	int have_4_level_pt;
+	int pm_type;
+#define PMAP_TYPE_NORMAL	0
+#define PMAP_TYPE_STAGE2	1
 	int pm_privileged;
 	volatile int pm_active;
 	int pm_refs;				/* ref count */
@@ -121,6 +124,7 @@ struct pv_entry;
 /* investigate */
 #define pmap_unuse_final(p)		do { /* nothing */ } while (0)
 int	pmap_fault_fixup(pmap_t, vaddr_t, vm_prot_t);
+void	pmap_convert(pmap_t, int);
 
 #define __HAVE_PMAP_MPSAFE_ENTER_COW
 #define __HAVE_PMAP_POPULATE
