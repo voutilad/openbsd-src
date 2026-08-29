@@ -23,10 +23,11 @@
 #include <sys/pledge.h>
 #include <sys/proc.h>
 
+#include <uvm/uvm.h>
 #include <uvm/uvm_extern.h>
+#include <uvm/uvm_page.h>
 
 #include <machine/armreg.h>
-#include <machine/cpufunc.h>
 #include <machine/cpu.h>
 #include <machine/hypervisor.h>
 #include <machine/pmap.h>
@@ -50,11 +51,14 @@
 
 #define HPFAR_FIPA_MASK		0xfffffffff0UL
 #define VTTBR_VMID_SHIFT	48
+#define VMM_S2_PAGE_SIZE	(4 * PAGE_SIZE)
+#define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t);
 
 static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
+static int	arm64_vmm_alloc_memory(struct vm *);
 static int	arm64_vmm_memtype(struct vm *, paddr_t);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static void	arm64_vmm_load_run(struct vcpu *);
@@ -129,6 +133,11 @@ pledge_ioctl_vmm_machdep(struct proc *p, long com)
 int
 vm_impl_init(struct vm *vm, struct proc *p)
 {
+	int error;
+
+	error = arm64_vmm_alloc_memory(vm);
+	if (error)
+		return (error);
 	pmap_convert(vm->vm_pmap, PMAP_TYPE_STAGE2);
 	return (0);
 }
@@ -136,6 +145,59 @@ vm_impl_init(struct vm *vm, struct proc *p)
 void
 vm_impl_deinit(struct vm *vm)
 {
+}
+
+/*
+ * Allocate guest RAM in aligned 16KB runs.  A 16KB stage-2 implementation
+ * can only compose four 4KB mappings when their input and output offsets
+ * agree.  Keeping each run physically contiguous and aligned satisfies that
+ * requirement while retaining the kernel's native 4KB page tables.
+ */
+static int
+arm64_vmm_alloc_memory(struct vm *vm)
+{
+	struct pglist plist;
+	struct uvm_object *uao;
+	struct vm_mem_range *vmr;
+	struct vm_page *pg;
+	voff_t off;
+	int error, i, n;
+
+	for (i = 0; i < vm->vm_nmemranges; i++) {
+		vmr = &vm->vm_memranges[i];
+		if (vmr->vmr_type == VM_MEM_MMIO)
+			continue;
+		if ((vmr->vmr_gpa & VMM_S2_PAGE_MASK) != 0 ||
+		    (vmr->vmr_size & VMM_S2_PAGE_MASK) != 0)
+			return (EINVAL);
+
+		uao = vm->vm_memory_slot[i];
+		KASSERT(uao != NULL);
+		for (off = 0; off < vmr->vmr_size; off += VMM_S2_PAGE_SIZE) {
+			TAILQ_INIT(&plist);
+			error = uvm_pglistalloc(VMM_S2_PAGE_SIZE, 0,
+			    (paddr_t)-1, VMM_S2_PAGE_SIZE, 0, &plist, 1,
+			    UVM_PLA_WAITOK | UVM_PLA_ZERO);
+			if (error)
+				return (error);
+
+			rw_enter(uao->vmobjlock, RW_WRITE);
+			n = 0;
+			while ((pg = TAILQ_FIRST(&plist)) != NULL) {
+				TAILQ_REMOVE(&plist, pg, pageq);
+				uvm_pagealloc_pg(pg, uao, off + ptoa(n++), NULL);
+				atomic_setbits_int(&pg->pg_flags,
+				    PG_CLEAN | PQ_AOBJ);
+				atomic_clearbits_int(&pg->pg_flags,
+				    PG_FAKE | PG_BUSY);
+				UVM_PAGE_OWN(pg, NULL);
+				uvm_pageactivate(pg);
+			}
+			rw_exit(uao->vmobjlock);
+			KASSERT(n == VMM_S2_PAGE_SIZE / PAGE_SIZE);
+		}
+	}
+	return (0);
 }
 
 int
@@ -264,32 +326,40 @@ static int
 arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 {
 	struct proc *p = curproc;
-	paddr_t hpa, ipa = trunc_page(gpa);
+	paddr_t hpa, mapped, ipa = trunc_page(gpa);
+	paddr_t ipa_base = ipa & ~VMM_S2_PAGE_MASK;
 	vaddr_t hva;
-	int error;
+	int error, i;
 
-	if (arm64_vmm_memtype(vcpu->vc_parent, ipa) !=
+	if (pmap_extract(vcpu->vc_parent->vm_pmap, ipa, &mapped))
+		return (0);
+
+	if (arm64_vmm_memtype(vcpu->vc_parent, ipa_base) !=
 	    VMM_MEM_TYPE_REGULAR)
 		return (EFAULT);
-	hva = arm64_vmm_translate_gpa(vcpu->vc_parent, ipa);
+	if (arm64_vmm_memtype(vcpu->vc_parent,
+	    ipa_base + VMM_S2_PAGE_SIZE - PAGE_SIZE) != VMM_MEM_TYPE_REGULAR)
+		return (EFAULT);
+	hva = arm64_vmm_translate_gpa(vcpu->vc_parent, ipa_base);
 	if (hva == 0)
 		return (EFAULT);
 
-	if (!pmap_extract(p->p_vmspace->vm_map.pmap, hva, &hpa)) {
-		error = uvm_fault_wire(&p->p_vmspace->vm_map, hva,
-		    hva + PAGE_SIZE, PROT_READ | PROT_WRITE);
+	error = uvm_fault_wire(&p->p_vmspace->vm_map, hva,
+	    hva + VMM_S2_PAGE_SIZE, PROT_READ | PROT_WRITE);
+	if (error)
+		return (error);
+	for (i = 0; i < VMM_S2_PAGE_SIZE / PAGE_SIZE; i++) {
+		if (!pmap_extract(p->p_vmspace->vm_map.pmap,
+		    hva + i * PAGE_SIZE, &hpa))
+			return (EFAULT);
+		error = pmap_enter(vcpu->vc_parent->vm_pmap,
+		    ipa_base + i * PAGE_SIZE, hpa,
+		    PROT_READ | PROT_WRITE | PROT_EXEC,
+		    PROT_READ | PROT_WRITE | PROT_EXEC);
 		if (error)
 			return (error);
-		if (!pmap_extract(p->p_vmspace->vm_map.pmap, hva, &hpa))
-			return (EFAULT);
 	}
-
-	/* Stage-2 instruction fetches require the page clean to PoC. */
-	cpu_idcache_wbinv_range(hva, PAGE_SIZE);
-
-	return (pmap_enter(vcpu->vc_parent->vm_pmap, ipa, hpa,
-	    PROT_READ | PROT_WRITE | PROT_EXEC,
-	    PROT_READ | PROT_WRITE | PROT_EXEC));
+	return (error);
 }
 
 static void
@@ -382,6 +452,13 @@ vm_run(struct vm_run_params *vrp)
 
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	WRITE_ONCE(vcpu->vc_curcpu, curcpu());
+	if ((vcpu->vc_regs.vrs_sctlr_el1 & SCTLR_M) == 0) {
+		error = arm64_vmm_fault_page(vcpu, vcpu->vc_regs.vrs_pc);
+		if (error) {
+			WRITE_ONCE(vcpu->vc_curcpu, NULL);
+			goto out_stopped;
+		}
+	}
 	for (;;) {
 		arm64_vmm_load_run(vcpu);
 		if (arm64_has_el2 == 2)
