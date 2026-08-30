@@ -59,12 +59,13 @@ create_memory_map(struct vmd_vm *vm)
 	    (memsize & (ARM64_UART_SIZE - 1)) != 0)
 		return;
 
-	vmc->vmc_memranges[0].vmr_gpa = ARM64_RAM_BASE;
-	vmc->vmc_memranges[0].vmr_size = memsize;
-	vmc->vmc_memranges[0].vmr_type = VM_MEM_RAM;
-	vmc->vmc_memranges[1].vmr_gpa = ARM64_UART_BASE;
-	vmc->vmc_memranges[1].vmr_size = ARM64_UART_SIZE;
-	vmc->vmc_memranges[1].vmr_type = VM_MEM_MMIO;
+	/* vmm(4) requires ranges in ascending guest-physical order. */
+	vmc->vmc_memranges[0].vmr_gpa = ARM64_UART_BASE;
+	vmc->vmc_memranges[0].vmr_size = ARM64_UART_SIZE;
+	vmc->vmc_memranges[0].vmr_type = VM_MEM_MMIO;
+	vmc->vmc_memranges[1].vmr_gpa = ARM64_RAM_BASE;
+	vmc->vmc_memranges[1].vmr_size = memsize;
+	vmc->vmc_memranges[1].vmr_type = VM_MEM_RAM;
 	vmc->vmc_nmemranges = 2;
 }
 
@@ -94,12 +95,15 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 {
 	Elf64_Ehdr eh;
 	Elf64_Phdr ph;
-	struct vm_mem_range *ram = &vm->vm_params.vmc_memranges[0];
+	struct vm_mem_range *ram;
 	void *mem;
 	uint64_t end, stack;
 	int entry_ok = 0, loaded = 0, nread;
 	unsigned int i;
 
+	ram = find_gpa_range(&vm->vm_params, ARM64_RAM_BASE, 1);
+	if (ram == NULL || ram->vmr_type != VM_MEM_RAM)
+		goto bad;
 	if (gzrewind(fp) == -1 || gzread(fp, &eh, sizeof(eh)) != sizeof(eh))
 		goto bad;
 	if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
