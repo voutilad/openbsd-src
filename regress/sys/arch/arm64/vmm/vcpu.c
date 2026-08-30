@@ -25,7 +25,9 @@
 #include <dev/vmm/vmm.h>
 
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,15 @@ static const uint32_t guest_code[] = {
 	0x14000000,
 };
 
+static volatile sig_atomic_t alarm_fired;
+
+static void
+alarm_handler(int sig)
+{
+	(void)sig;
+	alarm_fired = 1;
+}
+
 int
 main(void)
 {
@@ -53,6 +64,7 @@ main(void)
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
 	struct vm_terminate_params term;
+	struct sigaction sa;
 	int fd, ret = 1;
 
 	fd = open(VMM_NODE, O_RDWR);
@@ -101,12 +113,30 @@ main(void)
 	run.vrp_vm_id = vcp.vcp_id;
 	run.vrp_vcpu_id = 0;
 	run.vrp_exit = exit;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = alarm_handler;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGALRM, &sa, NULL) == -1) {
+		warn("sigaction");
+		goto out_free;
+	}
+	alarm(2);
 	do {
 		if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
+			if (errno == EINTR && alarm_fired)
+				break;
 			warn("VMM_IOC_RUN");
 			goto out_free;
 		}
 	} while (run.vrp_exit_reason == VM_EXIT_NONE);
+	alarm(0);
+	if (alarm_fired) {
+		warnx("guest failed to fault: pc=0x%llx x0=0x%llx "
+		    "x1=0x%llx", exit->vrs.vrs_pc,
+		    exit->vrs.vrs_gprs[VCPU_REGS_X0],
+		    exit->vrs.vrs_gprs[VCPU_REGS_X1]);
+		goto out_free;
+	}
 
 	if (run.vrp_exit_reason != VM_EXIT_EXCEPTION) {
 		warnx("unexpected exit reason 0x%04x: esr=0x%llx "
