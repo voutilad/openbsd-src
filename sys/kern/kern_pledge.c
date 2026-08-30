@@ -76,11 +76,14 @@
 #include "video.h"
 #include "pty.h"
 
-#if defined(__amd64__)
+#if defined(__amd64__) || defined(__arm64__)
 #include "vmm.h"
-#include "psp.h"
 #include <machine/conf.h>
 #include <dev/vmm/vmm.h>
+#endif
+
+#if defined(__amd64__)
+#include "psp.h"
 #endif
 
 #include "drm.h"
