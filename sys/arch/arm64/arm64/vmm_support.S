@@ -112,10 +112,13 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
+	ldr	x0, [x17, #AVR_FLUSH_TLB]
+	cbz	x0, .Lvhe_tlb_done
 	dsb	ishst
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
+.Lvhe_tlb_done:
 
 	ldr	x0, [x17, #AVR_SCTLR_EL1]
 	msr	sctlr_el12, x0
@@ -266,10 +269,13 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+	ldr	x0, [x17, #AVR_FLUSH_TLB]
+	cbz	x0, .Lnvhe_tlb_done
 	dsb	ishst
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
+.Lnvhe_tlb_done:
 
 	/* Disable guest stage 1 before replacing its translation registers. */
 	ldr	x0, [x17, #AVR_SCTLR_EL1]

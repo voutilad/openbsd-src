@@ -211,6 +211,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_hcr_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
+	uint64_t	avr_flush_tlb;
 	uint64_t	avr_cntvoff_el2;
 
 	uint64_t	avr_host_sp;

@@ -118,6 +118,7 @@ member	avr_vtcr_el2
 member	avr_hcr_el2
 member	avr_mode
 member	avr_exit
+member	avr_flush_tlb
 member	avr_cntvoff_el2
 member	avr_host_sp
 member	avr_host_sp_el0

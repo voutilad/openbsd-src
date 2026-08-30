@@ -203,6 +203,8 @@ arm64_vmm_alloc_memory(struct vm *vm)
 int
 vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 {
+	struct arm64_vmm_run *run;
+
 	vcpu->vc_control_va = (vaddr_t)km_alloc(PAGE_SIZE, &kv_page, &kp_zero,
 	    &kd_waitok);
 	if (vcpu->vc_control_va == 0)
@@ -220,6 +222,8 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 	vcpu->vc_regs.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
 	vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
+	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	run->avr_flush_tlb = 1;
 	return (0);
 }
 
@@ -326,6 +330,7 @@ static int
 arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 {
 	struct proc *p = curproc;
+	struct arm64_vmm_run *run;
 	paddr_t hpa, mapped, ipa = trunc_page(gpa);
 	paddr_t ipa_base = ipa & ~VMM_S2_PAGE_MASK;
 	vaddr_t hva;
@@ -359,6 +364,8 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 		if (error)
 			return (error);
 	}
+	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	run->avr_flush_tlb = 1;
 	return (error);
 }
 
@@ -477,19 +484,16 @@ vm_run(struct vm_run_params *vrp)
 	vrp->vrp_exit_reason = VM_EXIT_NONE;
 	for (;;) {
 		arm64_vmm_load_run(vcpu);
+		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 		if (arm64_has_el2 == 2)
 			arm64_vmm_enter_vhe(vcpu->vc_control_va);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
+		run->avr_flush_tlb = 0;
 		arm64_vmm_save_run(vcpu);
 		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
-		    run->avr_exit == ARM64_VMM_EXIT_FIQ) {
-			if (vcpu_must_stop(vcpu) ||
-			    (curcpu()->ci_schedstate.spc_schedflags &
-			    SPCF_SHOULDYIELD))
-				break;
-			continue;
-		}
+		    run->avr_exit == ARM64_VMM_EXIT_FIQ)
+			break;
 		if (run->avr_exit == ARM64_VMM_EXIT_SERROR)
 			panic("%s: SError while running vcpu", __func__);
 		if (run->avr_exit != ARM64_VMM_EXIT_SYNC)
