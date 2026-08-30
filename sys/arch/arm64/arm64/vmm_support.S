@@ -63,7 +63,11 @@ ENTRY(arm64_vmm_enter_vhe)
 	stp	x27, x28, [sp, #64]
 	stp	x29, x30, [sp, #80]
 
-	/* The temporary EL2 vector table handles synchronous guest exits only. */
+	/*
+	 * Mask exceptions while the host snapshot and vmm vectors are only
+	 * partially installed.  The original DAIF value is saved in the host
+	 * PSTATE below and restored by the final ERET.
+	 */
 	mrs	x2, daif
 	msr	daifset, #0xf
 	mov	x17, x0
@@ -71,6 +75,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	mov	x0, #ARM64_VMM_MODE_VHE
 	str	x0, [x17, #AVR_MODE]
 
+	/* Save state which guest execution or the EL2 vectors overwrite. */
 	mov	x0, sp
 	str	x0, [x17, #AVR_HOST_SP]
 	mrs	x0, sp_el0
@@ -100,6 +105,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 
+	/* All lower-EL AArch64 exceptions now enter the vmm vector slots. */
 	adrp	x0, hyp_vectors
 	add	x0, x0, :lo12:hyp_vectors
 	msr	vbar_el2, x0
@@ -108,18 +114,28 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
 
-	/* Clear TGE but retain E2H and access guest state via the EL12 aliases. */
+	/*
+	 * Clear TGE but retain E2H.  With E2H=1,TGE=0, EL12 names the
+	 * guest's virtual EL1 bank while the unqualified EL1 registers still
+	 * belong to the VHE host.  IMO/FMO/AMO also begin routing physical
+	 * asynchronous exceptions to these EL2 vectors at this point.
+	 */
 	ldr	x0, [x17, #AVR_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lvhe_tlb_done
+	/*
+	 * Invalidate only when C marked the stage-2 context dirty.  A global
+	 * TLBI on every host interrupt is prohibitively slow under nesting.
+	 */
 	dsb	ishst
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
 .Lvhe_tlb_done:
 
+	/* Restore guest EL1 state through the VHE EL12 aliases. */
 	ldr	x0, [x17, #AVR_SCTLR_EL1]
 	msr	sctlr_el12, x0
 	isb
@@ -164,6 +180,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	dsb	ish
 	isb
 
+	/* x17 is the run-page pointer, so restore the guest's x17 last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
 	ldp	x2, x3, [x17, #AVR_GPRS + 16]
 	ldp	x4, x5, [x17, #AVR_GPRS + 32]
@@ -184,6 +201,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	eret
 
 .Lvhe_return:
+	/* EL2 restored the stack and branch target; finish the C ABI return. */
 	ldp	x19, x20, [sp, #0]
 	ldp	x21, x22, [sp, #16]
 	ldp	x23, x24, [sp, #32]
@@ -195,8 +213,9 @@ ENTRY(arm64_vmm_enter_vhe)
 END(arm64_vmm_enter_vhe)
 
 /*
- * EL2 synchronous vector.  tpidr_el2 is zero for a host entry and contains
- * the physical run-page address while a guest is active.
+ * EL2 synchronous vector.  tpidr_el2 is both the guest-active sentinel and
+ * the run-page pointer: zero identifies the private host HVC entry, while a
+ * non-zero value identifies an exception taken from the guest.
  */
 ENTRY_NP(vmm_hyp_sync)
 	stp	x16, x17, [sp, #-16]!
@@ -214,13 +233,16 @@ ENTRY_NP(vmm_hyp_sync)
 	cmp	x16, x15
 	b.ne	.Lbad_hyp
 
-	/* x0 is safe to dereference here: EL2 uses physical addressing. */
+	/* x0 is safe to dereference here: nVHE EL2 uses physical addressing. */
 	mov	x17, x0
 	msr	tpidr_el2, x17
 	mov	x0, #ARM64_VMM_MODE_NVHE
 	str	x0, [x17, #AVR_MODE]
 
-	/* Save the host state shared with EL1. */
+	/*
+	 * nVHE runs the host at EL1 and the guest at the same exception level.
+	 * Save every EL1/EL0 register that will be replaced with guest state.
+	 */
 	mrs	x0, sp_el1
 	str	x0, [x17, #AVR_HOST_SP]
 	mrs	x0, sp_el0
@@ -264,20 +286,24 @@ ENTRY_NP(vmm_hyp_sync)
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 
-	/* Install the guest's stage-2 context. */
+	/* Install the guest's stage-2 root, VMID, and address-space controls. */
 	ldr	x0, [x17, #AVR_VTTBR_EL2]
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lnvhe_tlb_done
+	/* See the VHE path above: C requests this only after mapping changes. */
 	dsb	ishst
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
 .Lnvhe_tlb_done:
 
-	/* Disable guest stage 1 before replacing its translation registers. */
+	/*
+	 * Restore the guest's direct EL1 bank.  SCTLR is written first so a
+	 * disabled guest MMU remains disabled while TTBR/TCR are replaced.
+	 */
 	ldr	x0, [x17, #AVR_SCTLR_EL1]
 	msr	sctlr_el1, x0
 	isb
@@ -320,6 +346,7 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	elr_el2, x0
 	ldr	x0, [x17, #AVR_PSTATE]
 	msr	spsr_el2, x0
+	/* Enable stage 2 and physical exception routing only after state is live. */
 	ldr	x0, [x17, #AVR_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
@@ -347,11 +374,13 @@ ENTRY_NP(vmm_hyp_sync)
 	eret
 
 .Lguest_sync:
+	/* ESR_EL2 is decoded by arm64_vmm_save_run() and vm_run(). */
 	mov	x16, #ARM64_VMM_EXIT_SYNC
 	str	x16, [x17, #AVR_EXIT]
 	b	.Lguest_exit
 
 ENTRY_NP(vmm_hyp_irq)
+	/* Do not acknowledge the IRQ here; the restored host kernel will. */
 	stp	x16, x17, [sp, #-16]!
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
@@ -361,6 +390,7 @@ ENTRY_NP(vmm_hyp_irq)
 END(vmm_hyp_irq)
 
 ENTRY_NP(vmm_hyp_fiq)
+	/* FIQ follows the same transparent host-delivery path as IRQ. */
 	stp	x16, x17, [sp, #-16]!
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
@@ -370,6 +400,7 @@ ENTRY_NP(vmm_hyp_fiq)
 END(vmm_hyp_fiq)
 
 ENTRY_NP(vmm_hyp_serror)
+	/* C currently treats a physical SError observed in a vCPU as fatal. */
 	stp	x16, x17, [sp, #-16]!
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
@@ -378,7 +409,12 @@ ENTRY_NP(vmm_hyp_serror)
 END(vmm_hyp_serror)
 
 .Lguest_exit:
-	/* Preserve guest x18 while obtaining the physical run-page pointer. */
+	/*
+	 * x16/x17 were saved by the vector stub, but all other guest GPRs are
+	 * still live.  CNTVOFF_EL2 temporarily holds x18 while x18 becomes the
+	 * run-page base; its real value is already present in the run page and
+	 * will be restored later.
+	 */
 	msr	cntvoff_el2, x18
 	mrs	x18, tpidr_el2
 	ldp	x16, x17, [sp], #16
@@ -401,6 +437,7 @@ END(vmm_hyp_serror)
 	mrs	x0, cntvoff_el2
 	str	x0, [x18, #AVR_GPRS + 144]
 
+	/* Save state shared by both VHE and nVHE guest execution. */
 	mrs	x0, sp_el1
 	str	x0, [x18, #AVR_SP]
 	mrs	x0, sp_el0
@@ -417,6 +454,7 @@ END(vmm_hyp_serror)
 	cmp	x1, #ARM64_VMM_MODE_VHE
 	b.eq	.Lsave_guest_vhe
 
+	/* In nVHE the guest occupied the physical EL1 register bank. */
 	mrs	x0, elr_el1
 	str	x0, [x18, #AVR_ELR_EL1]
 	mrs	x0, spsr_el1
@@ -446,6 +484,7 @@ END(vmm_hyp_serror)
 	b	.Lsave_guest_done
 
 .Lsave_guest_vhe:
+	/* In VHE the guest EL1 bank remains accessible through EL12. */
 	mrs	x0, elr_el12
 	str	x0, [x18, #AVR_ELR_EL1]
 	mrs	x0, spsr_el12
@@ -474,6 +513,7 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_TPIDR_EL1]
 
 .Lsave_guest_done:
+	/* Capture the EL2 syndrome after all guest-visible EL1 state is safe. */
 	mrs	x0, esr_el2
 	str	x0, [x18, #AVR_ESR_EL2]
 	mrs	x0, far_el2
@@ -485,7 +525,11 @@ END(vmm_hyp_serror)
 	cmp	x1, #ARM64_VMM_MODE_VHE
 	b.eq	.Lrestore_vhe
 
-	/* Disable stage 2 before restoring the host EL1 translation regime. */
+	/*
+	 * Disable stage 2 before restoring the nVHE host EL1 translation
+	 * regime.  No exit-side TLBI is needed: a later mapping change marks
+	 * AVR_FLUSH_TLB, and otherwise the same VMID/context remains valid.
+	 */
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
@@ -526,6 +570,7 @@ END(vmm_hyp_serror)
 	msr	sctlr_el1, x0
 	isb
 
+	/* ERET resumes the instruction after HVC in arm64_vmm_enter_nvhe(). */
 	ldr	x0, [x18, #AVR_HOST_SP]
 	msr	sp_el1, x0
 	ldr	x0, [x18, #AVR_HOST_PC]
@@ -537,7 +582,11 @@ END(vmm_hyp_serror)
 	eret
 
 .Lrestore_vhe:
-	/* Re-enable the VHE host regime; the EL2 translation state stayed live. */
+	/*
+	 * Re-enable TGE for the VHE host; its EL2 stage-1 translation regime
+	 * stayed live throughout the guest run.  The guest used EL12, so only
+	 * genuinely shared EL0/EL1 registers need explicit restoration here.
+	 */
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
@@ -557,6 +606,7 @@ END(vmm_hyp_serror)
 	msr	tpidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
 	msr	cntvoff_el2, x0
+	/* ERET lands on .Lvhe_return with the original DAIF and NZCV restored. */
 	ldr	x0, [x18, #AVR_HOST_PC]
 	msr	elr_el2, x0
 	ldr	x0, [x18, #AVR_HOST_PSTATE]

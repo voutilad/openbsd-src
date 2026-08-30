@@ -35,6 +35,15 @@
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
 
+/*
+ * Seed registers which are not exercised by the stage-2 fault regression,
+ * then spin forever.  A physical host timer interrupt must take the CPU to
+ * EL2 despite the guest PSTATE.I bit set below.  After that exit, the kernel
+ * must report these values exactly as the guest left them.
+ *
+ * 0x1313 uses only architecturally writable SPSR_EL1 bits; reserved bits in
+ * a more visually obvious pattern would be cleared by the CPU.
+ */
 static const uint32_t guest_code[] = {
 	0xd2822221,	/* mov x1, #0x1111 */
 	0xd5184101,	/* msr sp_el0, x1 */
@@ -106,6 +115,7 @@ main(void)
 	}
 	memcpy((void *)create.vcp_memranges[0].vmr_va, guest_code,
 	    sizeof(guest_code));
+	/* Guest instruction fetch is not coherent with these data stores. */
 	__builtin___clear_cache((char *)create.vcp_memranges[0].vmr_va,
 	    (char *)create.vcp_memranges[0].vmr_va + sizeof(guest_code));
 
@@ -132,6 +142,10 @@ main(void)
 	memset(&run, 0, sizeof(run));
 	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &exit;
+	/*
+	 * VM_EXIT_NONE is the arm64 API's host-interrupt yield.  Retry it until
+	 * SIGALRM proves the process can run while the guest remains busy.
+	 */
 	alarm(1);
 	do {
 		rv = ioctl(fd, VMM_IOC_RUN, &run);
@@ -152,6 +166,7 @@ main(void)
 		warnx("busy guest did not yield");
 		goto out;
 	}
+	/* Every asynchronous exit must be a complete architectural save. */
 	if (check_register("sp_el0", exit.vrs.vrs_sp_el0, 0x1111) ||
 	    check_register("elr_el1", exit.vrs.vrs_elr_el1, 0x2222) ||
 	    check_register("spsr_el1", exit.vrs.vrs_spsr_el1, 0x1313) ||

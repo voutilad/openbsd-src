@@ -83,15 +83,20 @@ struct vcpu_inject_event {
 #define VCPU_REGS_X30		30
 
 struct vcpu_reg_state {
+	/* Integer and exception-entry state used to resume the guest. */
 	uint64_t			vrs_gprs[VCPU_REGS_NGPRS];
-	uint64_t			vrs_sp;
-	uint64_t			vrs_sp_el0;
-	uint64_t			vrs_pc;
-	uint64_t			vrs_pstate;
+	uint64_t			vrs_sp;		/* SP_EL1 (EL1h) */
+	uint64_t			vrs_sp_el0;	/* SP_EL0 */
+	uint64_t			vrs_pc;		/* ELR_EL2 */
+	uint64_t			vrs_pstate;	/* SPSR_EL2 */
+
+	/* EL1's exception-return and syndrome state. */
 	uint64_t			vrs_elr_el1;
 	uint64_t			vrs_spsr_el1;
 	uint64_t			vrs_esr_el1;
 	uint64_t			vrs_far_el1;
+
+	/* EL1 stage-1 translation and execution controls. */
 	uint64_t			vrs_sctlr_el1;
 	uint64_t			vrs_tcr_el1;
 	uint64_t			vrs_ttbr0_el1;
@@ -100,6 +105,8 @@ struct vcpu_reg_state {
 	uint64_t			vrs_vbar_el1;
 	uint64_t			vrs_contextidr_el1;
 	uint64_t			vrs_cpacr_el1;
+
+	/* Thread identifiers visible at EL0 and EL1. */
 	uint64_t			vrs_tpidr_el0;
 	uint64_t			vrs_tpidrro_el0;
 	uint64_t			vrs_tpidr_el1;
@@ -153,11 +160,12 @@ enum {
 #define ARM64_VMM_MODE_NVHE	1
 #define ARM64_VMM_MODE_VHE	2
 
+/* Private EL2-to-C exit reasons, distinct from the public VM_EXIT_* ABI. */
 #define ARM64_VMM_EXIT_NONE	0
-#define ARM64_VMM_EXIT_SYNC	1
-#define ARM64_VMM_EXIT_IRQ	2
-#define ARM64_VMM_EXIT_FIQ	3
-#define ARM64_VMM_EXIT_SERROR	4
+#define ARM64_VMM_EXIT_SYNC	1	/* guest synchronous exception */
+#define ARM64_VMM_EXIT_IRQ	2	/* physical host IRQ */
+#define ARM64_VMM_EXIT_FIQ	3	/* physical host FIQ */
+#define ARM64_VMM_EXIT_SERROR	4	/* physical SError */
 
 enum {
 	VMM_MODE_UNKNOWN,
@@ -182,6 +190,7 @@ struct proc;
  * disabled.  Keep the assembly offsets in genassym.cf in sync.
  */
 struct arm64_vmm_run {
+	/* Guest state copied from struct vcpu_reg_state before entry. */
 	uint64_t	avr_gprs[VCPU_REGS_NGPRS];
 	uint64_t	avr_sp;
 	uint64_t	avr_sp_el0;
@@ -203,17 +212,22 @@ struct arm64_vmm_run {
 	uint64_t	avr_tpidrro_el0;
 	uint64_t	avr_tpidr_el1;
 
+	/* Syndrome state captured by the EL2 vectors on a guest exit. */
 	uint64_t	avr_esr_el2;
 	uint64_t	avr_far_el2;
 	uint64_t	avr_hpfar_el2;
+
+	/* EL2 controls constructed by arm64_vmm_load_run(). */
 	uint64_t	avr_vttbr_el2;
 	uint64_t	avr_vtcr_el2;
 	uint64_t	avr_hcr_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
+	/* Invalidate this VMID's cached stage-2 translations before entry. */
 	uint64_t	avr_flush_tlb;
 	uint64_t	avr_cntvoff_el2;
 
+	/* Host state overwritten while the guest context is installed. */
 	uint64_t	avr_host_sp;
 	uint64_t	avr_host_sp_el0;
 	uint64_t	avr_host_pc;

@@ -116,6 +116,7 @@ vmmioctl_machdep(dev_t dev, u_long cmd, caddr_t data, int flag,
 {
 	switch (cmd) {
 	case VMM_IOC_INTR:
+		/* Interrupt injection belongs to the future userland GIC. */
 		return (EOPNOTSUPP);
 	default:
 		return (ENOTTY);
@@ -205,6 +206,11 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 {
 	struct arm64_vmm_run *run;
 
+	/*
+	 * nVHE enters EL2 with stage 1 disabled, so its vector code addresses
+	 * this page by physical address.  VHE uses the same page through its
+	 * kernel virtual address because the host EL2 stage 1 remains enabled.
+	 */
 	vcpu->vc_control_va = (vaddr_t)km_alloc(PAGE_SIZE, &kv_page, &kp_zero,
 	    &kd_waitok);
 	if (vcpu->vc_control_va == 0)
@@ -223,6 +229,7 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 	    PSR_M_EL1h;
 	vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	/* A recycled VMID must not inherit translations from an older VM. */
 	run->avr_flush_tlb = 1;
 	return (0);
 }
@@ -339,6 +346,11 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 	if (pmap_extract(vcpu->vc_parent->vm_pmap, ipa, &mapped))
 		return (0);
 
+	/*
+	 * The hardware stage-2 granule is 16KB even though OpenBSD pages are
+	 * 4KB.  Fault and install the complete aligned group so one hardware
+	 * descriptor always covers four contiguous host pages.
+	 */
 	if (arm64_vmm_memtype(vcpu->vc_parent, ipa_base) !=
 	    VMM_MEM_TYPE_REGULAR)
 		return (EFAULT);
@@ -365,6 +377,7 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 			return (error);
 	}
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	/* A cached translation fault may survive until the next TLBI. */
 	run->avr_flush_tlb = 1;
 	return (error);
 }
@@ -398,6 +411,13 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	run->avr_vttbr_el2 = vcpu->vc_parent->vm_pmap->pm_pt0pa |
 	    ((uint64_t)(vcpu->vc_parent->vm_id & 0xff) << VTTBR_VMID_SHIFT);
 	run->avr_vtcr_el2 = VTCR_STAGE2_39;
+	/*
+	 * VM enables stage 2 and RW selects an AArch64 EL1 guest.  TWI/TWE
+	 * make WFI/WFE observable to the API.  API/APK leave pointer
+	 * authentication available.  IMO/FMO/AMO route physical asynchronous
+	 * exceptions to EL2 so a guest cannot mask the host's interrupt source.
+	 * No virtual interrupt is injected here; that requires a userland GIC.
+	 */
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
 	if (arm64_has_el2 == 2)
@@ -433,6 +453,7 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 	vrs->vrs_tpidrro_el0 = run->avr_tpidrro_el0;
 	vrs->vrs_tpidr_el1 = run->avr_tpidr_el1;
 	memcpy(&vcpu->vc_exit.vrs, vrs, sizeof(*vrs));
+	/* ESR/FAR/HPFAR describe the exception that caused this EL2 exit. */
 	vcpu->vc_exit.vesr = run->avr_esr_el2;
 	vcpu->vc_exit.vfar = run->avr_far_el2;
 	vcpu->vc_exit.vhpfar = run->avr_hpfar_el2;
@@ -474,6 +495,10 @@ vm_run(struct vm_run_params *vrp)
 
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	WRITE_ONCE(vcpu->vc_curcpu, curcpu());
+	/*
+	 * With guest stage 1 disabled, PC is itself the IPA.  Install its
+	 * initial 16KB stage-2 mapping before attempting the first instruction.
+	 */
 	if ((vcpu->vc_regs.vrs_sctlr_el1 & SCTLR_M) == 0) {
 		error = arm64_vmm_fault_page(vcpu, vcpu->vc_regs.vrs_pc);
 		if (error) {
@@ -483,17 +508,31 @@ vm_run(struct vm_run_params *vrp)
 	}
 	vrp->vrp_exit_reason = VM_EXIT_NONE;
 	for (;;) {
+		/* Materialize the saved vCPU state in the EL2 run page. */
 		arm64_vmm_load_run(vcpu);
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 		if (arm64_has_el2 == 2)
 			arm64_vmm_enter_vhe(vcpu->vc_control_va);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
+		/*
+		 * EL2 has executed the requested TLBI even if a pending host IRQ
+		 * prevented the guest from retiring an instruction.  Do not repeat
+		 * this expensive operation until a stage-2 mapping changes.
+		 */
 		run->avr_flush_tlb = 0;
 		arm64_vmm_save_run(vcpu);
+		/*
+		 * The EL2 vector has restored the host context without acknowledging
+		 * the interrupt.  Its normal host handler runs before execution gets
+		 * back here.  Returning VM_EXIT_NONE on every physical IRQ/FIQ gives
+		 * the scheduler and pending signals an unconditional opportunity to
+		 * run; userland simply retries VMM_IOC_RUN.
+		 */
 		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
 		    run->avr_exit == ARM64_VMM_EXIT_FIQ)
 			break;
+		/* SError is host-fatal until recovery semantics are designed. */
 		if (run->avr_exit == ARM64_VMM_EXIT_SERROR)
 			panic("%s: SError while running vcpu", __func__);
 		if (run->avr_exit != ARM64_VMM_EXIT_SYNC)
@@ -502,8 +541,10 @@ vm_run(struct vm_run_params *vrp)
 		ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
 
 		if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L) {
+			/* HPFAR supplies IPA[47:12], while FAR supplies its offset. */
 			ipa = ((run->avr_hpfar_el2 & HPFAR_FIPA_MASK) << 8) |
 			    (run->avr_far_el2 & PAGE_MASK);
+			/* Bound a broken mapping/fault loop before returning to userland. */
 			if (ipa == last_ipa) {
 				if (++retries > 4) {
 					vrp->vrp_exit_reason = VM_EXIT_EXCEPTION;

@@ -39,7 +39,11 @@
 #define FAULT_GPA	GUEST_MEM_SIZE
 #define HPFAR_FIPA_MASK	0xfffffffff0UL
 
-/* mov x0, #GUEST_RESULT; ldr x2, [x1]; b . */
+/*
+ * Set a recognizable result and load through x1, which RESETCPU points one
+ * byte beyond guest RAM.  The load must cause a lower-EL stage-2 data abort;
+ * reaching the final branch means the access incorrectly succeeded.
+ */
 static const uint32_t guest_code[] = {
 	0xd2800840,
 	0xf9400022,
@@ -89,6 +93,7 @@ main(void)
 		err(1, "VMM_IOC_SHAREMEM");
 	memcpy((void *)vcp.vcp_memranges[0].vmr_va, guest_code,
 	    sizeof(guest_code));
+	/* Make the newly written opcodes visible to guest instruction fetch. */
 	__builtin___clear_cache((char *)vcp.vcp_memranges[0].vmr_va,
 	    (char *)vcp.vcp_memranges[0].vmr_va + sizeof(guest_code));
 
@@ -120,6 +125,11 @@ main(void)
 		warn("sigaction");
 		goto out_free;
 	}
+	/*
+	 * A host IRQ is deliberately exposed as VM_EXIT_NONE.  Retry those
+	 * transparent yields, but bound the test so a lost stage-2 abort cannot
+	 * wedge the regression suite or monopolize a host CPU.
+	 */
 	alarm(2);
 	do {
 		if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
@@ -145,6 +155,7 @@ main(void)
 		    exit->vhpfar, exit->vrs.vrs_pc);
 		goto out_free;
 	}
+	/* EC 0x24 is a data abort from a lower exception level (the guest). */
 	if (ESR_ELx_EXCEPTION(exit->vesr) != 0x24) {
 		warnx("unexpected ESR_EL2 0x%llx", exit->vesr);
 		goto out_free;

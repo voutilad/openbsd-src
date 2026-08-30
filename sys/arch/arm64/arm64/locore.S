@@ -177,6 +177,11 @@ drop_to_el1:
 	.align 11
 	.globl hyp_vectors
 hyp_vectors:
+	/*
+	 * vmm only replaces the lower-EL AArch64 vectors.  Host exceptions
+	 * continue to use the normal kernel vectors installed outside a vCPU
+	 * run, while AArch32 guests and EL2t are not supported here.
+	 */
 	VECT_EMPTY	/* Synchronous EL2t */
 	VECT_EMPTY	/* IRQ EL2t */
 	VECT_EMPTY	/* FIQ EL2t */
