@@ -16,6 +16,9 @@
  */
 #include <sys/param.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
+
+#include <machine/armreg.h>
 
 #include <errno.h>
 #include <string.h>
@@ -24,7 +27,17 @@
 #include "vmm.h"
 #include "arm64_vm.h"
 
+#define EXCP_DATA_ABORT_L	0x24
+#define HPFAR_FIPA_MASK		0xfffffffff0UL
+#define ISS_DATA_SAS_SHIFT	22
+#define ISS_DATA_SRT_SHIFT	16
+
+extern struct vmd	*env;
 extern struct vmd_vm	*current_vm;
+
+static int	arm64_mmio_access(paddr_t, int, uint32_t *);
+static int	arm64_write_regs(struct vm_run_params *);
+static int	vcpu_exit_mmio(struct vm_run_params *);
 
 void
 create_memory_map(struct vmd_vm *vm)
@@ -190,9 +203,83 @@ vcpu_deassert_irq(int fd, uint32_t vcpu_id, int vector)
 int
 vcpu_exit(struct vm_run_params *vrp)
 {
-	fatalx("%s: unimplemented", __func__);
-	/* NOTREACHED */
-	return (-1);
+	switch (vrp->vrp_exit_reason) {
+	case VM_EXIT_EXCEPTION:
+		return (vcpu_exit_mmio(vrp));
+	case VM_EXIT_HVC:
+	case VM_EXIT_WFX:
+		vcpu_halt(vrp->vrp_vcpu_id);
+		return (0);
+	default:
+		log_warnx("unexpected arm64 vcpu exit reason 0x%x",
+		    vrp->vrp_exit_reason);
+		return (EIO);
+	}
+}
+
+static int
+arm64_mmio_access(paddr_t gpa, int write, uint32_t *data)
+{
+	(void)write;
+	(void)data;
+	log_warnx("unhandled arm64 MMIO access at 0x%lx", gpa);
+	return (EFAULT);
+}
+
+static int
+arm64_write_regs(struct vm_run_params *vrp)
+{
+	struct vm_rwregs_params write;
+
+	memset(&write, 0, sizeof(write));
+	write.vrwp_vm_id = vrp->vrp_vm_id;
+	write.vrwp_vcpu_id = vrp->vrp_vcpu_id;
+	write.vrwp_mask = VM_RWREGS_ALL;
+	memcpy(&write.vrwp_regs, &vrp->vrp_exit->vrs,
+	    sizeof(write.vrwp_regs));
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_WRITEREGS, &write) == -1)
+		return (errno);
+	return (0);
+}
+
+static int
+vcpu_exit_mmio(struct vm_run_params *vrp)
+{
+	struct vm_exit *exit = vrp->vrp_exit;
+	struct vcpu_reg_state *vrs = &exit->vrs;
+	paddr_t gpa;
+	uint64_t esr = exit->vesr;
+	uint32_t data, reg, sas;
+	int error, write;
+
+	if (ESR_ELx_EXCEPTION(esr) != EXCP_DATA_ABORT_L ||
+	    (esr & ISS_DATA_ISV) == 0) {
+		log_warnx("unhandled arm64 exception: esr=0x%llx "
+		    "far=0x%llx hpfar=0x%llx pc=0x%llx", esr,
+		    exit->vfar, exit->vhpfar, vrs->vrs_pc);
+		return (EFAULT);
+	}
+
+	sas = (esr & ISS_DATA_SAS_MASK) >> ISS_DATA_SAS_SHIFT;
+	reg = (esr & ISS_DATA_SRT_MASK) >> ISS_DATA_SRT_SHIFT;
+	write = (esr & ISS_DATA_WnR) != 0;
+	if (sas != 2 || (esr & (ISS_DATA_SSE | ISS_DATA_SF)) != 0) {
+		log_warnx("unsupported arm64 MMIO access: esr=0x%llx", esr);
+		return (EOPNOTSUPP);
+	}
+
+	gpa = ((exit->vhpfar & HPFAR_FIPA_MASK) << 8) |
+	    (exit->vfar & PAGE_MASK);
+	data = 0;
+	if (write && reg != 31)
+		data = vrs->vrs_gprs[reg];
+	error = arm64_mmio_access(gpa, write, &data);
+	if (error)
+		return (error);
+	if (!write && reg != 31)
+		vrs->vrs_gprs[reg] = data;
+	vrs->vrs_pc += sizeof(uint32_t);
+	return (arm64_write_regs(vrp));
 }
 
 uint8_t
