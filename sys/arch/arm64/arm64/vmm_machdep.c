@@ -370,8 +370,13 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 
 	memcpy(run->avr_gprs, vrs->vrs_gprs, sizeof(run->avr_gprs));
 	run->avr_sp = vrs->vrs_sp;
+	run->avr_sp_el0 = vrs->vrs_sp_el0;
 	run->avr_pc = vrs->vrs_pc;
 	run->avr_pstate = vrs->vrs_pstate;
+	run->avr_elr_el1 = vrs->vrs_elr_el1;
+	run->avr_spsr_el1 = vrs->vrs_spsr_el1;
+	run->avr_esr_el1 = vrs->vrs_esr_el1;
+	run->avr_far_el1 = vrs->vrs_far_el1;
 	run->avr_sctlr_el1 = vrs->vrs_sctlr_el1;
 	run->avr_tcr_el1 = vrs->vrs_tcr_el1;
 	run->avr_ttbr0_el1 = vrs->vrs_ttbr0_el1;
@@ -380,6 +385,8 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	run->avr_vbar_el1 = vrs->vrs_vbar_el1;
 	run->avr_contextidr_el1 = vrs->vrs_contextidr_el1;
 	run->avr_cpacr_el1 = vrs->vrs_cpacr_el1;
+	run->avr_tpidr_el0 = vrs->vrs_tpidr_el0;
+	run->avr_tpidrro_el0 = vrs->vrs_tpidrro_el0;
 	run->avr_tpidr_el1 = vrs->vrs_tpidr_el1;
 	run->avr_vttbr_el2 = vcpu->vc_parent->vm_pmap->pm_pt0pa |
 	    ((uint64_t)(vcpu->vc_parent->vm_id & 0xff) << VTTBR_VMID_SHIFT);
@@ -400,8 +407,13 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 
 	memcpy(vrs->vrs_gprs, run->avr_gprs, sizeof(vrs->vrs_gprs));
 	vrs->vrs_sp = run->avr_sp;
+	vrs->vrs_sp_el0 = run->avr_sp_el0;
 	vrs->vrs_pc = run->avr_pc;
 	vrs->vrs_pstate = run->avr_pstate;
+	vrs->vrs_elr_el1 = run->avr_elr_el1;
+	vrs->vrs_spsr_el1 = run->avr_spsr_el1;
+	vrs->vrs_esr_el1 = run->avr_esr_el1;
+	vrs->vrs_far_el1 = run->avr_far_el1;
 	vrs->vrs_sctlr_el1 = run->avr_sctlr_el1;
 	vrs->vrs_tcr_el1 = run->avr_tcr_el1;
 	vrs->vrs_ttbr0_el1 = run->avr_ttbr0_el1;
@@ -410,6 +422,8 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 	vrs->vrs_vbar_el1 = run->avr_vbar_el1;
 	vrs->vrs_contextidr_el1 = run->avr_contextidr_el1;
 	vrs->vrs_cpacr_el1 = run->avr_cpacr_el1;
+	vrs->vrs_tpidr_el0 = run->avr_tpidr_el0;
+	vrs->vrs_tpidrro_el0 = run->avr_tpidrro_el0;
 	vrs->vrs_tpidr_el1 = run->avr_tpidr_el1;
 	memcpy(&vcpu->vc_exit.vrs, vrs, sizeof(*vrs));
 	vcpu->vc_exit.vesr = run->avr_esr_el2;

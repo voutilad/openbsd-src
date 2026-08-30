@@ -73,6 +73,8 @@ ENTRY(arm64_vmm_enter_vhe)
 
 	mov	x0, sp
 	str	x0, [x17, #AVR_HOST_SP]
+	mrs	x0, sp_el0
+	str	x0, [x17, #AVR_HOST_SP_EL0]
 	adr	x0, .Lvhe_return
 	str	x0, [x17, #AVR_HOST_PC]
 	mrs	x1, nzcv
@@ -87,6 +89,10 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el1
 	str	x0, [x17, #AVR_HOST_CPACR_EL1]
+	mrs	x0, tpidr_el0
+	str	x0, [x17, #AVR_HOST_TPIDR_EL0]
+	mrs	x0, tpidrro_el0
+	str	x0, [x17, #AVR_HOST_TPIDRRO_EL0]
 	mrs	x0, tpidr_el1
 	str	x0, [x17, #AVR_HOST_TPIDR_EL1]
 	mrs	x0, cntvoff_el2
@@ -107,7 +113,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	hcr_el2, x0
 	isb
 	dsb	ishst
-	tlbi	vmalls12e1
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
@@ -129,6 +134,20 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	contextidr_el12, x0
 	ldr	x0, [x17, #AVR_CPACR_EL1]
 	msr	cpacr_el12, x0
+	ldr	x0, [x17, #AVR_ELR_EL1]
+	msr	elr_el12, x0
+	ldr	x0, [x17, #AVR_SPSR_EL1]
+	msr	spsr_el12, x0
+	ldr	x0, [x17, #AVR_ESR_EL1]
+	msr	esr_el12, x0
+	ldr	x0, [x17, #AVR_FAR_EL1]
+	msr	far_el12, x0
+	ldr	x0, [x17, #AVR_SP_EL0]
+	msr	sp_el0, x0
+	ldr	x0, [x17, #AVR_TPIDR_EL0]
+	msr	tpidr_el0, x0
+	ldr	x0, [x17, #AVR_TPIDRRO_EL0]
+	msr	tpidrro_el0, x0
 	ldr	x0, [x17, #AVR_TPIDR_EL1]
 	msr	tpidr_el1, x0
 	ldr	x0, [x17, #AVR_CNTVOFF_EL2]
@@ -139,8 +158,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	elr_el2, x0
 	ldr	x0, [x17, #AVR_PSTATE]
 	msr	spsr_el2, x0
-	dsb	ish
-	ic	ialluis
 	dsb	ish
 	isb
 
@@ -203,10 +220,20 @@ ENTRY_NP(vmm_hyp_sync)
 	/* Save the host state shared with EL1. */
 	mrs	x0, sp_el1
 	str	x0, [x17, #AVR_HOST_SP]
+	mrs	x0, sp_el0
+	str	x0, [x17, #AVR_HOST_SP_EL0]
 	mrs	x0, elr_el2
 	str	x0, [x17, #AVR_HOST_PC]
 	mrs	x0, spsr_el2
 	str	x0, [x17, #AVR_HOST_PSTATE]
+	mrs	x0, elr_el1
+	str	x0, [x17, #AVR_HOST_ELR_EL1]
+	mrs	x0, spsr_el1
+	str	x0, [x17, #AVR_HOST_SPSR_EL1]
+	mrs	x0, esr_el1
+	str	x0, [x17, #AVR_HOST_ESR_EL1]
+	mrs	x0, far_el1
+	str	x0, [x17, #AVR_HOST_FAR_EL1]
 	mrs	x0, sctlr_el1
 	str	x0, [x17, #AVR_HOST_SCTLR_EL1]
 	mrs	x0, tcr_el1
@@ -223,6 +250,10 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el1
 	str	x0, [x17, #AVR_HOST_CPACR_EL1]
+	mrs	x0, tpidr_el0
+	str	x0, [x17, #AVR_HOST_TPIDR_EL0]
+	mrs	x0, tpidrro_el0
+	str	x0, [x17, #AVR_HOST_TPIDRRO_EL0]
 	mrs	x0, tpidr_el1
 	str	x0, [x17, #AVR_HOST_TPIDR_EL1]
 	mrs	x0, cntvoff_el2
@@ -236,7 +267,6 @@ ENTRY_NP(vmm_hyp_sync)
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
 	dsb	ishst
-	tlbi	vmalls12e1
 	tlbi	vmalls12e1is
 	dsb	ish
 	isb
@@ -259,6 +289,20 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	contextidr_el1, x0
 	ldr	x0, [x17, #AVR_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x17, #AVR_ELR_EL1]
+	msr	elr_el1, x0
+	ldr	x0, [x17, #AVR_SPSR_EL1]
+	msr	spsr_el1, x0
+	ldr	x0, [x17, #AVR_ESR_EL1]
+	msr	esr_el1, x0
+	ldr	x0, [x17, #AVR_FAR_EL1]
+	msr	far_el1, x0
+	ldr	x0, [x17, #AVR_SP_EL0]
+	msr	sp_el0, x0
+	ldr	x0, [x17, #AVR_TPIDR_EL0]
+	msr	tpidr_el0, x0
+	ldr	x0, [x17, #AVR_TPIDRRO_EL0]
+	msr	tpidrro_el0, x0
 	ldr	x0, [x17, #AVR_TPIDR_EL1]
 	msr	tpidr_el1, x0
 	ldr	x0, [x17, #AVR_CNTVOFF_EL2]
@@ -273,8 +317,6 @@ ENTRY_NP(vmm_hyp_sync)
 	ldr	x0, [x17, #AVR_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
-	dsb	ish
-	ic	ialluis
 	dsb	ish
 	isb
 
@@ -355,6 +397,12 @@ END(vmm_hyp_serror)
 
 	mrs	x0, sp_el1
 	str	x0, [x18, #AVR_SP]
+	mrs	x0, sp_el0
+	str	x0, [x18, #AVR_SP_EL0]
+	mrs	x0, tpidr_el0
+	str	x0, [x18, #AVR_TPIDR_EL0]
+	mrs	x0, tpidrro_el0
+	str	x0, [x18, #AVR_TPIDRRO_EL0]
 	mrs	x0, elr_el2
 	str	x0, [x18, #AVR_PC]
 	mrs	x0, spsr_el2
@@ -363,6 +411,14 @@ END(vmm_hyp_serror)
 	cmp	x1, #ARM64_VMM_MODE_VHE
 	b.eq	.Lsave_guest_vhe
 
+	mrs	x0, elr_el1
+	str	x0, [x18, #AVR_ELR_EL1]
+	mrs	x0, spsr_el1
+	str	x0, [x18, #AVR_SPSR_EL1]
+	mrs	x0, esr_el1
+	str	x0, [x18, #AVR_ESR_EL1]
+	mrs	x0, far_el1
+	str	x0, [x18, #AVR_FAR_EL1]
 	mrs	x0, sctlr_el1
 	str	x0, [x18, #AVR_SCTLR_EL1]
 	mrs	x0, tcr_el1
@@ -384,6 +440,14 @@ END(vmm_hyp_serror)
 	b	.Lsave_guest_done
 
 .Lsave_guest_vhe:
+	mrs	x0, elr_el12
+	str	x0, [x18, #AVR_ELR_EL1]
+	mrs	x0, spsr_el12
+	str	x0, [x18, #AVR_SPSR_EL1]
+	mrs	x0, esr_el12
+	str	x0, [x18, #AVR_ESR_EL1]
+	mrs	x0, far_el12
+	str	x0, [x18, #AVR_FAR_EL1]
 	mrs	x0, sctlr_el12
 	str	x0, [x18, #AVR_SCTLR_EL1]
 	mrs	x0, tcr_el12
@@ -419,11 +483,6 @@ END(vmm_hyp_serror)
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
-	dsb	ishst
-	tlbi	vmalls12e1
-	tlbi	vmalls12e1is
-	dsb	ish
-	isb
 
 	ldr	x0, [x18, #AVR_HOST_TCR_EL1]
 	msr	tcr_el1, x0
@@ -439,6 +498,20 @@ END(vmm_hyp_serror)
 	msr	contextidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_ELR_EL1]
+	msr	elr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_SPSR_EL1]
+	msr	spsr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_ESR_EL1]
+	msr	esr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_FAR_EL1]
+	msr	far_el1, x0
+	ldr	x0, [x18, #AVR_HOST_SP_EL0]
+	msr	sp_el0, x0
+	ldr	x0, [x18, #AVR_HOST_TPIDR_EL0]
+	msr	tpidr_el0, x0
+	ldr	x0, [x18, #AVR_HOST_TPIDRRO_EL0]
+	msr	tpidrro_el0, x0
 	ldr	x0, [x18, #AVR_HOST_TPIDR_EL1]
 	msr	tpidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
@@ -459,11 +532,6 @@ END(vmm_hyp_serror)
 
 .Lrestore_vhe:
 	/* Re-enable the VHE host regime; the EL2 translation state stayed live. */
-	dsb	ishst
-	tlbi	vmalls12e1
-	tlbi	vmalls12e1is
-	dsb	ish
-	isb
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
@@ -473,6 +541,12 @@ END(vmm_hyp_serror)
 	msr	contextidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_SP_EL0]
+	msr	sp_el0, x0
+	ldr	x0, [x18, #AVR_HOST_TPIDR_EL0]
+	msr	tpidr_el0, x0
+	ldr	x0, [x18, #AVR_HOST_TPIDRRO_EL0]
+	msr	tpidrro_el0, x0
 	ldr	x0, [x18, #AVR_HOST_TPIDR_EL1]
 	msr	tpidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]

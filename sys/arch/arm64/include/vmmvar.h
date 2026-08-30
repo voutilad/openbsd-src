@@ -85,8 +85,13 @@ struct vcpu_inject_event {
 struct vcpu_reg_state {
 	uint64_t			vrs_gprs[VCPU_REGS_NGPRS];
 	uint64_t			vrs_sp;
+	uint64_t			vrs_sp_el0;
 	uint64_t			vrs_pc;
 	uint64_t			vrs_pstate;
+	uint64_t			vrs_elr_el1;
+	uint64_t			vrs_spsr_el1;
+	uint64_t			vrs_esr_el1;
+	uint64_t			vrs_far_el1;
 	uint64_t			vrs_sctlr_el1;
 	uint64_t			vrs_tcr_el1;
 	uint64_t			vrs_ttbr0_el1;
@@ -95,6 +100,8 @@ struct vcpu_reg_state {
 	uint64_t			vrs_vbar_el1;
 	uint64_t			vrs_contextidr_el1;
 	uint64_t			vrs_cpacr_el1;
+	uint64_t			vrs_tpidr_el0;
+	uint64_t			vrs_tpidrro_el0;
 	uint64_t			vrs_tpidr_el1;
 };
 
@@ -177,8 +184,13 @@ struct proc;
 struct arm64_vmm_run {
 	uint64_t	avr_gprs[VCPU_REGS_NGPRS];
 	uint64_t	avr_sp;
+	uint64_t	avr_sp_el0;
 	uint64_t	avr_pc;
 	uint64_t	avr_pstate;
+	uint64_t	avr_elr_el1;
+	uint64_t	avr_spsr_el1;
+	uint64_t	avr_esr_el1;
+	uint64_t	avr_far_el1;
 	uint64_t	avr_sctlr_el1;
 	uint64_t	avr_tcr_el1;
 	uint64_t	avr_ttbr0_el1;
@@ -187,6 +199,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_vbar_el1;
 	uint64_t	avr_contextidr_el1;
 	uint64_t	avr_cpacr_el1;
+	uint64_t	avr_tpidr_el0;
+	uint64_t	avr_tpidrro_el0;
 	uint64_t	avr_tpidr_el1;
 
 	uint64_t	avr_esr_el2;
@@ -200,8 +214,13 @@ struct arm64_vmm_run {
 	uint64_t	avr_cntvoff_el2;
 
 	uint64_t	avr_host_sp;
+	uint64_t	avr_host_sp_el0;
 	uint64_t	avr_host_pc;
 	uint64_t	avr_host_pstate;
+	uint64_t	avr_host_elr_el1;
+	uint64_t	avr_host_spsr_el1;
+	uint64_t	avr_host_esr_el1;
+	uint64_t	avr_host_far_el1;
 	uint64_t	avr_host_sctlr_el1;
 	uint64_t	avr_host_tcr_el1;
 	uint64_t	avr_host_ttbr0_el1;
@@ -210,6 +229,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_vbar_el1;
 	uint64_t	avr_host_contextidr_el1;
 	uint64_t	avr_host_cpacr_el1;
+	uint64_t	avr_host_tpidr_el0;
+	uint64_t	avr_host_tpidrro_el0;
 	uint64_t	avr_host_tpidr_el1;
 	uint64_t	avr_host_cntvoff_el2;
 	uint64_t	avr_host_hcr_el2;
