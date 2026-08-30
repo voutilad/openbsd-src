@@ -20,8 +20,12 @@
 
 #include <machine/armreg.h>
 
+#include <elf.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
+
+#include <zlib.h>
 
 #include "vmd.h"
 #include "vmm.h"
@@ -39,6 +43,8 @@ extern int		 con_fd;
 
 static int	arm64_mmio_access(paddr_t, int, uint32_t *);
 static int	arm64_write_regs(struct vm_run_params *);
+static int	load_payload_elf(gzFile, struct vmd_vm *,
+		    struct vcpu_reg_state *);
 static int	vcpu_exit_mmio(struct vm_run_params *);
 
 void
@@ -65,8 +71,92 @@ create_memory_map(struct vmd_vm *vm)
 int
 load_firmware(struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 {
-	fatalx("%s: unimplemented", __func__);
-	/* NOTREACHED */
+	gzFile fp;
+	int ret;
+
+	if ((fp = gzdopen(vm->vm_kernel, "r")) == NULL) {
+		log_warnx("failed to open arm64 payload");
+		return (-1);
+	}
+	ret = load_payload_elf(fp, vm, vrs);
+	gzclose(fp);
+	return (ret);
+}
+
+/*
+ * Load the small, fixed-address ELF images used to exercise this initial
+ * backend.  This is intentionally not an OpenBSD kernel loader: every
+ * PT_LOAD segment must already name an address in guest RAM, and no
+ * relocation, boot arguments, symbols, or firmware tables are provided.
+ */
+static int
+load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
+{
+	Elf64_Ehdr eh;
+	Elf64_Phdr ph;
+	struct vm_mem_range *ram = &vm->vm_params.vmc_memranges[0];
+	void *mem;
+	uint64_t end, stack;
+	int entry_ok = 0, loaded = 0, nread;
+	unsigned int i;
+
+	if (gzrewind(fp) == -1 || gzread(fp, &eh, sizeof(eh)) != sizeof(eh))
+		goto bad;
+	if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+	    eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+	    eh.e_ident[EI_DATA] != ELFDATA2LSB ||
+	    eh.e_ident[EI_VERSION] != EV_CURRENT ||
+	    eh.e_type != ET_EXEC || eh.e_machine != EM_AARCH64 ||
+	    eh.e_version != EV_CURRENT || eh.e_ehsize != sizeof(eh) ||
+	    eh.e_phentsize != sizeof(ph) || eh.e_phnum == 0 ||
+	    eh.e_phnum > 64)
+		goto bad;
+
+	for (i = 0; i < eh.e_phnum; i++) {
+		if (eh.e_phoff > INT64_MAX - i * sizeof(ph) ||
+		    gzseek(fp, eh.e_phoff + i * sizeof(ph), SEEK_SET) == -1 ||
+		    gzread(fp, &ph, sizeof(ph)) != sizeof(ph))
+			goto bad;
+		if (ph.p_type != PT_LOAD || ph.p_memsz == 0)
+			continue;
+		if (ph.p_filesz > ph.p_memsz || ph.p_filesz > INT_MAX ||
+		    ph.p_memsz > SIZE_MAX || ph.p_paddr > UINT64_MAX - ph.p_memsz)
+			goto bad;
+		end = ph.p_paddr + ph.p_memsz;
+		mem = hvaddr_mem(ph.p_paddr, ph.p_memsz);
+		if (mem == NULL)
+			goto bad;
+		memset(mem, 0, ph.p_memsz);
+		if (ph.p_filesz != 0) {
+			if (gzseek(fp, ph.p_offset, SEEK_SET) == -1)
+				goto bad;
+			nread = gzread(fp, mem, ph.p_filesz);
+			if (nread < 0 || (uint64_t)nread != ph.p_filesz)
+				goto bad;
+		}
+		__builtin___clear_cache(mem, (char *)mem + ph.p_memsz);
+		if ((ph.p_flags & PF_X) != 0 && eh.e_entry >= ph.p_paddr &&
+		    eh.e_entry < end)
+			entry_ok = 1;
+		loaded = 1;
+	}
+	if (!loaded || !entry_ok || eh.e_entry % sizeof(uint32_t) != 0 ||
+	    ram->vmr_gpa > UINT64_MAX - ram->vmr_size || ram->vmr_size < 16)
+		goto bad;
+
+	stack = ram->vmr_gpa + ram->vmr_size;
+	memset(vrs, 0, sizeof(*vrs));
+	vrs->vrs_pc = eh.e_entry;
+	vrs->vrs_sp = (stack - 16) & ~0xfUL;
+	vrs->vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D | PSR_M_EL1h;
+	vrs->vrs_sctlr_el1 = SCTLR_RES1;
+	log_debug("%s: entry 0x%llx, stack 0x%llx", __func__,
+	    vrs->vrs_pc, vrs->vrs_sp);
+	return (0);
+
+bad:
+	errno = ENOEXEC;
+	log_warnx("invalid arm64 payload ELF");
 	return (-1);
 }
 
