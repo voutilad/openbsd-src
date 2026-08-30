@@ -144,8 +144,26 @@ arm64_vmm_intr_pending(struct vm_intr_params *vip)
 		goto out;
 	}
 
+	/*
+	 * HCR_EL2 has a virtual IRQ input but no interrupt identity.  Until a
+	 * userland GIC exists, preserve the VMM_IOC_INTR interface while treating
+	 * vip_intr as a line level: zero lowers VI and any non-zero value raises
+	 * it.  In particular, vip_intr is not an arm64 INTID here.
+	 *
+	 * vm_run() holds vc_lock across guest execution, so this ioctl cannot use
+	 * that lock: it must be able to interrupt a running vCPU.  The naturally
+	 * aligned value and READ_ONCE/WRITE_ONCE pair make the concurrent access
+	 * indivisible and prevent the compiler from caching it.
+	 */
 	WRITE_ONCE(vcpu->vc_intr, vip->vip_intr);
 #ifdef MULTIPROCESSOR
+	/*
+	 * A vCPU executing on another CPU will not rebuild HCR_EL2 until it
+	 * returns from the guest.  The no-op IPI supplies that exit without
+	 * attaching any interrupt-controller semantics to the kick.  If the vCPU
+	 * stops or migrates while vc_curcpu is sampled, the kick may be redundant;
+	 * the pending line remains recorded and is seen on its next entry.
+	 */
 	ci = READ_ONCE(vcpu->vc_curcpu);
 	if (ci != NULL)
 		arm_send_ipi(ci, ARM_IPI_NOP);
@@ -451,6 +469,13 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	 */
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
+	/*
+	 * VI presents the CPU's virtual IRQ input.  The CPU takes the exception
+	 * only when PSTATE.I permits it, and masks IRQs as part of exception
+	 * entry.  VI stays level-triggered until userland lowers it with a zero
+	 * VMM_IOC_INTR.  A future userland GIC will provide INTIDs, priority,
+	 * acknowledge, and EOI behavior; none of those are synthesized here.
+	 */
 	if (READ_ONCE(vcpu->vc_intr) != 0)
 		run->avr_hcr_el2 |= HCR_VI;
 	if (arm64_has_el2 == 2)
@@ -604,6 +629,7 @@ vm_run(struct vm_run_params *vrp)
 	}
 	WRITE_ONCE(vcpu->vc_curcpu, NULL);
 
+	/* Tell userland whether a raised virtual IRQ can be taken on re-entry. */
 	vrp->vrp_irqready = (vcpu->vc_regs.vrs_pstate & PSR_I) == 0;
 	if (copyout(&vcpu->vc_exit, vrp->vrp_exit,
 	    sizeof(vcpu->vc_exit)) != 0)

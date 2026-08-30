@@ -39,10 +39,16 @@
 #define VECTOR_BASE	PAGE_SIZE
 #define IRQ_SPX_OFFSET	0x280
 
+/* The guest remains in EL1h until another process raises its virtual IRQ. */
 static const uint32_t guest_spin[] = {
 	0x14000000,	/* b . */
 };
 
+/*
+ * An IRQ taken from current EL using SP_EL1 selects the VBAR_EL1 + 0x280
+ * slot.  Reaching HVC with the marker in x0 proves that the CPU took that
+ * architectural vector; merely observing a host-side vCPU exit is not enough.
+ */
 static const uint32_t guest_irq[] = {
 	0xd2800840,	/* mov x0, #GUEST_RESULT */
 	0xd4000002,	/* hvc #0 */
@@ -95,6 +101,7 @@ main(void)
 	}
 	mem = (char *)create.vcp_memranges[0].vmr_va;
 	memcpy(mem, guest_spin, sizeof(guest_spin));
+	/* Each AArch64 vector slot is 128 bytes within the 2KB vector table. */
 	memcpy(mem + VECTOR_BASE + IRQ_SPX_OFFSET, guest_irq,
 	    sizeof(guest_irq));
 	__builtin___clear_cache(mem, mem + GUEST_MEM_SIZE);
@@ -102,6 +109,7 @@ main(void)
 	memset(&reset, 0, sizeof(reset));
 	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_sp = GUEST_MEM_SIZE;
+	/* Deliberately omit PSR_I so the asserted virtual IRQ is deliverable. */
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_A | PSR_D |
 	    PSR_M_EL1h;
 	reset.vrp_init_state.vrs_sctlr_el1 = SCTLR_RES1;
@@ -125,6 +133,7 @@ main(void)
 		goto out;
 	}
 	if (child == 0) {
+		/* Let the parent enter its busy guest before issuing the kick. */
 		usleep(250000);
 		memset(&intr, 0, sizeof(intr));
 		intr.vip_vm_id = create.vcp_id;
@@ -138,6 +147,7 @@ main(void)
 	memset(&run, 0, sizeof(run));
 	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
+	/* Host IRQ yields are transparent; only the guest's HVC ends the loop. */
 	alarm(5);
 	for (;;) {
 		if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
@@ -176,6 +186,7 @@ main(void)
 		goto out;
 	}
 
+	/* Lower the level-triggered line just as a userland GIC eventually will. */
 	memset(&intr, 0, sizeof(intr));
 	intr.vip_vm_id = create.vcp_id;
 	if (ioctl(fd, VMM_IOC_INTR, &intr) == -1) {
