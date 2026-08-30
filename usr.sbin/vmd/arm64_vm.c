@@ -26,6 +26,7 @@
 #include "vmd.h"
 #include "vmm.h"
 #include "arm64_vm.h"
+#include "pl011.h"
 
 #define EXCP_DATA_ABORT_L	0x24
 #define HPFAR_FIPA_MASK		0xfffffffff0UL
@@ -34,6 +35,7 @@
 
 extern struct vmd	*env;
 extern struct vmd_vm	*current_vm;
+extern int		 con_fd;
 
 static int	arm64_mmio_access(paddr_t, int, uint32_t *);
 static int	arm64_write_regs(struct vm_run_params *);
@@ -82,6 +84,7 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 		    "devices");
 		return (EOPNOTSUPP);
 	}
+	pl011_init(con_fd);
 	return (0);
 }
 
@@ -220,8 +223,9 @@ vcpu_exit(struct vm_run_params *vrp)
 static int
 arm64_mmio_access(paddr_t gpa, int write, uint32_t *data)
 {
-	(void)write;
-	(void)data;
+	if (gpa >= ARM64_UART_BASE &&
+	    gpa - ARM64_UART_BASE < ARM64_UART_SIZE)
+		return (pl011_mmio(gpa, write, data));
 	log_warnx("unhandled arm64 MMIO access at 0x%lx", gpa);
 	return (EFAULT);
 }
