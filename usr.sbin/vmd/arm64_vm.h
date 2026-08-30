@@ -18,8 +18,18 @@
 #ifndef _VMD_ARM64_VM_H_
 #define _VMD_ARM64_VM_H_
 
+/*
+ * Initial "virt"-style physical map.  RAM and the PL011 addresses match the
+ * conventional QEMU arm64 layout, which gives a later firmware/FDT layer a
+ * familiar ABI without requiring one for the first payload test.
+ *
+ * The current vmm(4) arm64 stage-2 tables use a 16KB granule.  OpenBSD itself
+ * uses 4KB PAGE_SIZE pages here, hence the four-page expression.  MMIO ranges
+ * and RAM sizes presented to vmm(4) must respect the stage-2 granule.
+ */
+#define ARM64_STAGE2_PAGE_SIZE	(4 * PAGE_SIZE)
 #define ARM64_RAM_BASE		0x40000000UL
 #define ARM64_UART_BASE		0x09000000UL
-#define ARM64_UART_SIZE		(4 * PAGE_SIZE)
+#define ARM64_UART_SIZE		ARM64_STAGE2_PAGE_SIZE
 
 #endif /* _VMD_ARM64_VM_H_ */

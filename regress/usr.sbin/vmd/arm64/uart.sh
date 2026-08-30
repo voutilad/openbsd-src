@@ -17,6 +17,7 @@ tty=
 cleanup()
 {
 	set +e
+	# No vmmci exists on arm64 yet, so request a bounded forced stop.
 	timeout 3 ${VMCTL} stop -f "${vmname}" >/dev/null 2>&1
 	if [ -n "${vmdpid}" ]; then
 		kill "${vmdpid}" >/dev/null 2>&1
@@ -40,10 +41,12 @@ vmd_ready()
 trap cleanup EXIT HUP INT TERM
 
 if vmd_ready; then
+	# The control socket has a fixed path; never disrupt a running service.
 	fail "a vmd instance is already using /var/run/vmd.sock"
 fi
 
 rm -f "${console}" "${vmdlog}"
+# Foreground/debug mode gives this script one parent PID to reap reliably.
 ${VMD} -d -f /dev/null >"${vmdlog}" 2>&1 &
 vmdpid=$!
 

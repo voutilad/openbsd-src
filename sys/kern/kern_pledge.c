@@ -76,12 +76,14 @@
 #include "video.h"
 #include "pty.h"
 
+/* vmm(4) and its pledged ioctl path exist on both supported architectures. */
 #if defined(__amd64__) || defined(__arm64__)
 #include "vmm.h"
 #include <machine/conf.h>
 #include <dev/vmm/vmm.h>
 #endif
 
+/* The PSP device remains amd64-specific. */
 #if defined(__amd64__)
 #include "psp.h"
 #endif

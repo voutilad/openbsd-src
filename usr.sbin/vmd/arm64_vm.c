@@ -53,13 +53,22 @@ create_memory_map(struct vmd_vm *vm)
 	struct vmop_create_params *vmc = &vm->vm_params;
 	size_t memsize = vmc->vmc_memranges[0].vmr_size;
 
+	/*
+	 * The parser temporarily stores requested RAM in range zero.  Replace
+	 * that input with the physical map vmm(4) will actually instantiate.
+	 * Leaving the count at zero makes any rejected layout fail CREATE.
+	 */
 	vmc->vmc_nmemranges = 0;
 	if (vmc->vmc_ncpus != 1 || memsize == 0 ||
 	    memsize > VMM_MAX_VM_MEM_SIZE ||
-	    (memsize & (ARM64_UART_SIZE - 1)) != 0)
+	    (memsize & (ARM64_STAGE2_PAGE_SIZE - 1)) != 0)
 		return;
 
-	/* vmm(4) requires ranges in ascending guest-physical order. */
+	/*
+	 * vmm(4) requires ascending, non-overlapping guest-physical ranges.
+	 * VM_MEM_MMIO reserves an IPA aperture but allocates no backing memory;
+	 * accesses therefore exit to this process for PL011 emulation.
+	 */
 	vmc->vmc_memranges[0].vmr_gpa = ARM64_UART_BASE;
 	vmc->vmc_memranges[0].vmr_size = ARM64_UART_SIZE;
 	vmc->vmc_memranges[0].vmr_type = VM_MEM_MMIO;
@@ -75,6 +84,7 @@ load_firmware(struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	gzFile fp;
 	int ret;
 
+	/* Use vmd's usual zlib stream so plain and gzip payloads both work. */
 	if ((fp = gzdopen(vm->vm_kernel, "r")) == NULL) {
 		log_warnx("failed to open arm64 payload");
 		return (-1);
@@ -101,11 +111,13 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	int entry_ok = 0, loaded = 0, nread;
 	unsigned int i;
 
+	/* The loader may only write the RAM range created above. */
 	ram = find_gpa_range(&vm->vm_params, ARM64_RAM_BASE, 1);
 	if (ram == NULL || ram->vmr_type != VM_MEM_RAM)
 		goto bad;
 	if (gzrewind(fp) == -1 || gzread(fp, &eh, sizeof(eh)) != sizeof(eh))
 		goto bad;
+	/* Reject anything except a native, fixed-address AArch64 executable. */
 	if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
 	    eh.e_ident[EI_CLASS] != ELFCLASS64 ||
 	    eh.e_ident[EI_DATA] != ELFDATA2LSB ||
@@ -117,12 +129,17 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		goto bad;
 
 	for (i = 0; i < eh.e_phnum; i++) {
+		/* Re-seek because loading one segment moves the gzip stream. */
 		if (eh.e_phoff > INT64_MAX - i * sizeof(ph) ||
 		    gzseek(fp, eh.e_phoff + i * sizeof(ph), SEEK_SET) == -1 ||
 		    gzread(fp, &ph, sizeof(ph)) != sizeof(ph))
 			goto bad;
 		if (ph.p_type != PT_LOAD || ph.p_memsz == 0)
 			continue;
+		/*
+		 * p_paddr is the guest IPA.  hvaddr_mem() rejects a segment that
+		 * crosses a range boundary, lands in MMIO, or lies outside RAM.
+		 */
 		if (ph.p_filesz > ph.p_memsz || ph.p_filesz > INT_MAX ||
 		    ph.p_memsz > SIZE_MAX || ph.p_paddr > UINT64_MAX - ph.p_memsz)
 			goto bad;
@@ -130,6 +147,7 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		mem = hvaddr_mem(ph.p_paddr, ph.p_memsz);
 		if (mem == NULL)
 			goto bad;
+		/* Zero the whole segment first so p_memsz - p_filesz is BSS. */
 		memset(mem, 0, ph.p_memsz);
 		if (ph.p_filesz != 0) {
 			if (gzseek(fp, ph.p_offset, SEEK_SET) == -1)
@@ -138,16 +156,25 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 			if (nread < 0 || (uint64_t)nread != ph.p_filesz)
 				goto bad;
 		}
+		/* Newly copied AArch64 instructions must be visible to the I-cache. */
 		__builtin___clear_cache(mem, (char *)mem + ph.p_memsz);
 		if ((ph.p_flags & PF_X) != 0 && eh.e_entry >= ph.p_paddr &&
 		    eh.e_entry < end)
 			entry_ok = 1;
 		loaded = 1;
 	}
+	/* Require an aligned entry point inside an executable load segment. */
 	if (!loaded || !entry_ok || eh.e_entry % sizeof(uint32_t) != 0 ||
 	    ram->vmr_gpa > UINT64_MAX - ram->vmr_size || ram->vmr_size < 16)
 		goto bad;
 
+	/*
+	 * Enter at EL1h with the MMU off.  Masking DAIF is important until a
+	 * guest installs exception vectors and, later, a GIC.  SCTLR_RES1 is
+	 * the architecturally valid disabled-MMU value used by vmm(4)'s reset
+	 * path.  The payload ABI currently supplies only PC and a 16-byte-
+	 * aligned stack; x0-x30 are deliberately zero.
+	 */
 	stack = ram->vmr_gpa + ram->vmr_size;
 	memset(vrs, 0, sizeof(*vrs));
 	vrs->vrs_pc = eh.e_entry;
@@ -172,6 +199,7 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 	(void)child_disks;
 	(void)child_taps;
 
+	/* Keep this first backend honest: the PL011 is its only device. */
 	if (vm->vm_params.vmc_ndisks != 0 ||
 	    vm->vm_params.vmc_nnics != 0 || vm->vm_cdrom != -1) {
 		log_warnx("arm64 guests do not yet support storage or network "
@@ -185,12 +213,14 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 void
 pause_vm_md(struct vmd_vm *vm)
 {
+	/* No arm64 device in this slice owns a timer or worker to pause. */
 	(void)vm;
 }
 
 void
 unpause_vm_md(struct vmd_vm *vm)
 {
+	/* See pause_vm_md(). */
 	(void)vm;
 }
 
@@ -204,6 +234,7 @@ find_gpa_range(struct vmop_create_params *vmc, paddr_t gpa, size_t len)
 		vmr = &vmc->vmc_memranges[i];
 		if (gpa < vmr->vmr_gpa)
 			continue;
+		/* Subtract first, then compare, to avoid end-address overflow. */
 		off = gpa - vmr->vmr_gpa;
 		if (off <= vmr->vmr_size && len <= vmr->vmr_size - off)
 			return (vmr);
@@ -217,6 +248,7 @@ hvaddr_mem(paddr_t gpa, size_t len)
 	struct vm_mem_range *vmr;
 	size_t off;
 
+	/* MMIO ranges have no userspace VA and must never be dereferenced. */
 	vmr = find_gpa_range(&current_vm->vm_params, gpa, len);
 	if (vmr == NULL || vmr->vmr_type != VM_MEM_RAM) {
 		errno = EFAULT;
@@ -256,6 +288,7 @@ read_mem(paddr_t src, void *buf, size_t len)
 int
 intr_pending(int vcpu_id)
 {
+	/* A userland GIC is intentionally outside this initial backend. */
 	(void)vm;
 	return (0);
 }
@@ -263,6 +296,7 @@ intr_pending(int vcpu_id)
 void
 intr_toggle_el(struct vmd_vm *vm, int irq, int val)
 {
+	/* There are no emulated interrupt lines to raise or lower yet. */
 	(void)vm;
 	(void)irq;
 	(void)val;
@@ -271,6 +305,7 @@ intr_toggle_el(struct vmd_vm *vm, int irq, int val)
 int
 intr_ack(int vcpu_id)
 {
+	/* No userland interrupt controller can acknowledge an IRQ yet. */
 	(void)vm;
 	return (-1);
 }
@@ -278,6 +313,7 @@ intr_ack(int vcpu_id)
 void
 vcpu_assert_vector(int fd, uint32_t vcpu_id, uint8_t vector)
 {
+	/* Device-to-GIC routing will replace this stub in a later increment. */
 	(void)vm_id;
 	(void)vcpu_id;
 	(void)irq;
@@ -286,6 +322,7 @@ vcpu_assert_vector(int fd, uint32_t vcpu_id, uint8_t vector)
 void
 vcpu_assert_irq(int fd, uint32_t vcpu_id, int vector)
 {
+	/* Device-to-GIC routing will replace this stub in a later increment. */
 	(void)vm_id;
 	(void)vcpu_id;
 	(void)irq;
@@ -300,6 +337,12 @@ vcpu_deassert_irq(int fd, uint32_t vcpu_id, int vector)
 int
 vcpu_exit(struct vm_run_params *vrp)
 {
+	/*
+	 * A stage-2 MMIO fault arrives as an exception exit.  HVC and trapped
+	 * WFI/WFE are safe idle points: park the vCPU thread instead of
+	 * immediately re-entering and consuming a host CPU.  An injected event
+	 * or VM teardown can wake the generic vcpu_halt() wait.
+	 */
 	switch (vrp->vrp_exit_reason) {
 	case VM_EXIT_EXCEPTION:
 		return (vcpu_exit_mmio(vrp));
@@ -317,6 +360,7 @@ vcpu_exit(struct vm_run_params *vrp)
 static int
 arm64_mmio_access(paddr_t gpa, int write, uint32_t *data)
 {
+	/* This address decoder deliberately contains only the UART aperture. */
 	if (gpa >= ARM64_UART_BASE &&
 	    gpa - ARM64_UART_BASE < ARM64_UART_SIZE)
 		return (pl011_mmio(gpa, write, data));
@@ -329,6 +373,12 @@ arm64_write_regs(struct vm_run_params *vrp)
 {
 	struct vm_rwregs_params write;
 
+	/*
+	 * VMM_IOC_RUN returned a snapshot in vm_exit.  Userland changed that
+	 * snapshot to complete the trapped instruction, so explicitly copy the
+	 * new register state back before the next RUN.  A full mask keeps the
+	 * interface simple for this first implementation.
+	 */
 	memset(&write, 0, sizeof(write));
 	write.vrwp_vm_id = vrp->vrp_vm_id;
 	write.vrwp_vcpu_id = vrp->vrp_vcpu_id;
@@ -350,6 +400,12 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 	uint32_t data, reg, sas;
 	int error, write;
 
+	/*
+	 * Only a Data Abort taken from a lower EL can describe the stage-2
+	 * load/store we emulate.  ISV says the remaining ISS fields (size,
+	 * target register, direction) are valid; without them instruction
+	 * decoding would be required.
+	 */
 	if (ESR_ELx_EXCEPTION(esr) != EXCP_DATA_ABORT_L ||
 	    (esr & ISS_DATA_ISV) == 0) {
 		log_warnx("unhandled arm64 exception: esr=0x%llx "
@@ -358,6 +414,11 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 		return (EFAULT);
 	}
 
+	/*
+	 * For now accept only unsigned 32-bit W-register accesses.  This is
+	 * enough for normal PL011 register I/O and keeps sign extension and
+	 * 64-bit X-register completion out of this first slice.
+	 */
 	sas = (esr & ISS_DATA_SAS_MASK) >> ISS_DATA_SAS_SHIFT;
 	reg = (esr & ISS_DATA_SRT_MASK) >> ISS_DATA_SRT_SHIFT;
 	write = (esr & ISS_DATA_WnR) != 0;
@@ -366,9 +427,16 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 		return (EOPNOTSUPP);
 	}
 
+	/*
+	 * HPFAR_EL2 supplies the faulting IPA above the low 12 bits; FAR_EL2
+	 * supplies the page offset.  HPFAR also carries the upper offset bits
+	 * needed by a 16KB stage-2 granule, so PAGE_MASK remains the native
+	 * 4KB mask here.
+	 */
 	gpa = ((exit->vhpfar & HPFAR_FIPA_MASK) << 8) |
 	    (exit->vfar & PAGE_MASK);
 	data = 0;
+	/* SRT==31 denotes WZR/XZR: writes are zero and loads are discarded. */
 	if (write && reg != 31)
 		data = vrs->vrs_gprs[reg];
 	error = arm64_mmio_access(gpa, write, &data);
@@ -376,6 +444,7 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 		return (error);
 	if (!write && reg != 31)
 		vrs->vrs_gprs[reg] = data;
+	/* AArch64 instructions are fixed at four bytes; finish the access once. */
 	vrs->vrs_pc += sizeof(uint32_t);
 	return (arm64_write_regs(vrp));
 }
