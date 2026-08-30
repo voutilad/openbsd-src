@@ -68,8 +68,12 @@ pl011_mmio(paddr_t gpa, int iswrite, uint32_t *data)
 		do {
 			n = write(pl011.pd_fd, &ch, sizeof(ch));
 		} while (n == -1 && errno == EINTR);
-		if (n != 1)
-			return (n == -1 ? errno : EIO);
+		/*
+		 * The PTY slave is closed whenever no vmctl console is attached.
+		 * Just as with ns8250, serial output is best-effort: a host-side
+		 * write failure must not turn a disconnected console into a fatal
+		 * vCPU exit.  FR continues to advertise an empty transmit FIFO.
+		 */
 		return (0);
 	}
 
