@@ -101,10 +101,12 @@ main(void)
 	run.vrp_vm_id = vcp.vcp_id;
 	run.vrp_vcpu_id = 0;
 	run.vrp_exit = exit;
-	if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
-		warn("VMM_IOC_RUN");
-		goto out_free;
-	}
+	do {
+		if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
+			warn("VMM_IOC_RUN");
+			goto out_free;
+		}
+	} while (run.vrp_exit_reason == VM_EXIT_NONE);
 
 	if (run.vrp_exit_reason != VM_EXIT_EXCEPTION) {
 		warnx("unexpected exit reason 0x%04x: esr=0x%llx "
