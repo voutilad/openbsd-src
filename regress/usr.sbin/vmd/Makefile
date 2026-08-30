@@ -4,9 +4,13 @@
 SUBDIR =
 SUBDIR += agentx config diskfmt
 
+.elif ${MACHINE} == "arm64"
+SUBDIR =
+SUBDIR += arm64
+
 .elif make(regress) || make(all)
 ${.TARGETS}:
-	# vmd(8) exists only on amd64, but not on ${MACHINE}
+	# vmd(8) does not exist on ${MACHINE}
 	@echo SKIPPED
 .endif
 

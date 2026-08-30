@@ -17,7 +17,7 @@ SUBDIR += rpki-client
 SUBDIR += snmpd
 SUBDIR += syslogd
 
-.if ${MACHINE} == "amd64"
+.if ${MACHINE} == "amd64" || ${MACHINE} == "arm64"
 SUBDIR += vmd
 .endif
 
