@@ -143,6 +143,15 @@ enum {
 #include <sys/queue.h>
 #include <sys/rwlock.h>
 
+#define ARM64_VMM_MODE_NVHE	1
+#define ARM64_VMM_MODE_VHE	2
+
+#define ARM64_VMM_EXIT_NONE	0
+#define ARM64_VMM_EXIT_SYNC	1
+#define ARM64_VMM_EXIT_IRQ	2
+#define ARM64_VMM_EXIT_FIQ	3
+#define ARM64_VMM_EXIT_SERROR	4
+
 enum {
 	VMM_MODE_UNKNOWN,
 	VMM_MODE_STAGE2
@@ -186,7 +195,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_vttbr_el2;
 	uint64_t	avr_vtcr_el2;
 	uint64_t	avr_hcr_el2;
-	uint64_t	avr_vector;
+	uint64_t	avr_mode;
+	uint64_t	avr_exit;
 	uint64_t	avr_cntvoff_el2;
 
 	uint64_t	avr_host_sp;

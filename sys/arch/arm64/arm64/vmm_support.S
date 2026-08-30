@@ -68,8 +68,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	daifset, #0xf
 	mov	x17, x0
 	msr	tpidr_el2, x17
-	mov	x0, #2
-	str	x0, [x17, #AVR_VECTOR]
+	mov	x0, #ARM64_VMM_MODE_VHE
+	str	x0, [x17, #AVR_MODE]
 
 	mov	x0, sp
 	str	x0, [x17, #AVR_HOST_SP]
@@ -181,7 +181,7 @@ END(arm64_vmm_enter_vhe)
 ENTRY_NP(vmm_hyp_sync)
 	stp	x16, x17, [sp, #-16]!
 	mrs	x17, tpidr_el2
-	cbnz	x17, .Lguest_exit
+	cbnz	x17, .Lguest_sync
 	ldp	x16, x17, [sp], #16
 
 	/* Only the private host-entry HVC is accepted outside guest context. */
@@ -197,6 +197,8 @@ ENTRY_NP(vmm_hyp_sync)
 	/* x0 is safe to dereference here: EL2 uses physical addressing. */
 	mov	x17, x0
 	msr	tpidr_el2, x17
+	mov	x0, #ARM64_VMM_MODE_NVHE
+	str	x0, [x17, #AVR_MODE]
 
 	/* Save the host state shared with EL1. */
 	mrs	x0, sp_el1
@@ -296,6 +298,37 @@ ENTRY_NP(vmm_hyp_sync)
 	ldr	x17, [x17, #AVR_GPRS + 136]
 	eret
 
+.Lguest_sync:
+	mov	x16, #ARM64_VMM_EXIT_SYNC
+	str	x16, [x17, #AVR_EXIT]
+	b	.Lguest_exit
+
+ENTRY_NP(vmm_hyp_irq)
+	stp	x16, x17, [sp, #-16]!
+	mrs	x17, tpidr_el2
+	cbz	x17, .Lbad_hyp
+	mov	x16, #ARM64_VMM_EXIT_IRQ
+	str	x16, [x17, #AVR_EXIT]
+	b	.Lguest_exit
+END(vmm_hyp_irq)
+
+ENTRY_NP(vmm_hyp_fiq)
+	stp	x16, x17, [sp, #-16]!
+	mrs	x17, tpidr_el2
+	cbz	x17, .Lbad_hyp
+	mov	x16, #ARM64_VMM_EXIT_FIQ
+	str	x16, [x17, #AVR_EXIT]
+	b	.Lguest_exit
+END(vmm_hyp_fiq)
+
+ENTRY_NP(vmm_hyp_serror)
+	stp	x16, x17, [sp, #-16]!
+	mrs	x17, tpidr_el2
+	cbz	x17, .Lbad_hyp
+	mov	x16, #ARM64_VMM_EXIT_SERROR
+	str	x16, [x17, #AVR_EXIT]
+END(vmm_hyp_serror)
+
 .Lguest_exit:
 	/* Preserve guest x18 while obtaining the physical run-page pointer. */
 	msr	cntvoff_el2, x18
@@ -326,8 +359,8 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x18, #AVR_PC]
 	mrs	x0, spsr_el2
 	str	x0, [x18, #AVR_PSTATE]
-	ldr	x1, [x18, #AVR_VECTOR]
-	cmp	x1, #2
+	ldr	x1, [x18, #AVR_MODE]
+	cmp	x1, #ARM64_VMM_MODE_VHE
 	b.eq	.Lsave_guest_vhe
 
 	mrs	x0, sctlr_el1
@@ -378,8 +411,8 @@ ENTRY_NP(vmm_hyp_sync)
 	mrs	x0, hpfar_el2
 	str	x0, [x18, #AVR_HPFAR_EL2]
 
-	ldr	x1, [x18, #AVR_VECTOR]
-	cmp	x1, #2
+	ldr	x1, [x18, #AVR_MODE]
+	cmp	x1, #ARM64_VMM_MODE_VHE
 	b.eq	.Lrestore_vhe
 
 	/* Disable stage 2 before restoring the host EL1 translation regime. */
@@ -448,7 +481,6 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	elr_el2, x0
 	ldr	x0, [x18, #AVR_HOST_PSTATE]
 	msr	spsr_el2, x0
-	str	xzr, [x18, #AVR_VECTOR]
 	msr	tpidr_el2, xzr
 	mov	x0, #0
 	eret

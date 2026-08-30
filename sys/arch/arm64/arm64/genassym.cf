@@ -40,6 +40,13 @@ include <machine/frame.h>
 include <machine/pcb.h>
 include <machine/vmmvar.h>
 
+define	ARM64_VMM_MODE_NVHE	ARM64_VMM_MODE_NVHE
+define	ARM64_VMM_MODE_VHE	ARM64_VMM_MODE_VHE
+define	ARM64_VMM_EXIT_SYNC	ARM64_VMM_EXIT_SYNC
+define	ARM64_VMM_EXIT_IRQ	ARM64_VMM_EXIT_IRQ
+define	ARM64_VMM_EXIT_FIQ	ARM64_VMM_EXIT_FIQ
+define	ARM64_VMM_EXIT_SERROR	ARM64_VMM_EXIT_SERROR
+
 struct	sigframe
 member	sf_sc
 
@@ -102,7 +109,8 @@ member	avr_hpfar_el2
 member	avr_vttbr_el2
 member	avr_vtcr_el2
 member	avr_hcr_el2
-member	avr_vector
+member	avr_mode
+member	avr_exit
 member	avr_cntvoff_el2
 member	avr_host_sp
 member	avr_host_pc

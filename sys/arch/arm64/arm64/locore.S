@@ -188,9 +188,9 @@ hyp_vectors:
 	VECT_EMPTY	/* Error EL2h */
 
 	VECT_VMM(vmm_hyp_sync)	/* Synchronous 64-bit EL1 */
-	VECT_EMPTY	/* IRQ 64-bit EL1 */
-	VECT_EMPTY	/* FIQ 64-bit EL1 */
-	VECT_EMPTY	/* Error 64-bit EL1 */
+	VECT_VMM(vmm_hyp_irq)	/* IRQ 64-bit EL1 */
+	VECT_VMM(vmm_hyp_fiq)	/* FIQ 64-bit EL1 */
+	VECT_VMM(vmm_hyp_serror) /* Error 64-bit EL1 */
 
 	VECT_EMPTY	/* Synchronous 32-bit EL1 */
 	VECT_EMPTY	/* IRQ 32-bit EL1 */

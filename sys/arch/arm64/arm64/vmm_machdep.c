@@ -385,9 +385,10 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	    ((uint64_t)(vcpu->vc_parent->vm_id & 0xff) << VTTBR_VMID_SHIFT);
 	run->avr_vtcr_el2 = VTCR_STAGE2_39;
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
-	    HCR_API | HCR_APK;
+	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
 	if (arm64_has_el2 == 2)
 		run->avr_hcr_el2 |= HCR_E2H;
+	run->avr_exit = ARM64_VMM_EXIT_NONE;
 	run->avr_cntvoff_el2 = 0;
 }
 
@@ -459,6 +460,7 @@ vm_run(struct vm_run_params *vrp)
 			goto out_stopped;
 		}
 	}
+	vrp->vrp_exit_reason = VM_EXIT_NONE;
 	for (;;) {
 		arm64_vmm_load_run(vcpu);
 		if (arm64_has_el2 == 2)
@@ -466,6 +468,19 @@ vm_run(struct vm_run_params *vrp)
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
 		arm64_vmm_save_run(vcpu);
+		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
+		    run->avr_exit == ARM64_VMM_EXIT_FIQ) {
+			if (vcpu_must_stop(vcpu) ||
+			    (curcpu()->ci_schedstate.spc_schedflags &
+			    SPCF_SHOULDYIELD))
+				break;
+			continue;
+		}
+		if (run->avr_exit == ARM64_VMM_EXIT_SERROR)
+			panic("%s: SError while running vcpu", __func__);
+		if (run->avr_exit != ARM64_VMM_EXIT_SYNC)
+			panic("%s: unknown EL2 exit %llu", __func__,
+			    run->avr_exit);
 		ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
 
 		if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L) {
