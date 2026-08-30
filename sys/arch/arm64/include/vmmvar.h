@@ -261,6 +261,7 @@ struct vcpu {
 	uint8_t			vc_virt_mode;	/* [I] */
 	struct rwlock		vc_lock;
 	struct cpu_info		*vc_curcpu;	/* [a] */
+	uint16_t		vc_intr;	/* [a] virtual IRQ pending */
 	struct vm_exit		vc_exit;	/* [v] */
 	struct vcpu_reg_state	vc_regs;	/* [v] */
 	struct vcpu_inject_event vc_inject;	/* [v] */

@@ -30,6 +30,7 @@
 #include <machine/armreg.h>
 #include <machine/cpu.h>
 #include <machine/hypervisor.h>
+#include <machine/intr.h>
 #include <machine/pmap.h>
 #include <machine/vmmvar.h>
 
@@ -61,6 +62,7 @@ static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
 static int	arm64_vmm_memtype(struct vm *, paddr_t);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
+static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static void	arm64_vmm_load_run(struct vcpu *);
 static void	arm64_vmm_save_run(struct vcpu *);
 
@@ -116,11 +118,41 @@ vmmioctl_machdep(dev_t dev, u_long cmd, caddr_t data, int flag,
 {
 	switch (cmd) {
 	case VMM_IOC_INTR:
-		/* Interrupt injection belongs to the future userland GIC. */
-		return (EOPNOTSUPP);
+		return (arm64_vmm_intr_pending(
+		    (struct vm_intr_params *)data));
 	default:
 		return (ENOTTY);
 	}
+}
+
+static int
+arm64_vmm_intr_pending(struct vm_intr_params *vip)
+{
+	struct vm *vm;
+	struct vcpu *vcpu;
+#ifdef MULTIPROCESSOR
+	struct cpu_info *ci;
+#endif
+	int error, ret = 0;
+
+	error = vm_find(vip->vip_vm_id, &vm);
+	if (error != 0)
+		return (error);
+	vcpu = vm_find_vcpu(vm, vip->vip_vcpu_id);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
+
+	WRITE_ONCE(vcpu->vc_intr, vip->vip_intr);
+#ifdef MULTIPROCESSOR
+	ci = READ_ONCE(vcpu->vc_curcpu);
+	if (ci != NULL)
+		arm_send_ipi(ci, ARM_IPI_NOP);
+#endif
+out:
+	refcnt_rele_wake(&vm->vm_refcnt);
+	return (ret);
 }
 
 int
@@ -416,10 +448,11 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	 * make WFI/WFE observable to the API.  API/APK leave pointer
 	 * authentication available.  IMO/FMO/AMO route physical asynchronous
 	 * exceptions to EL2 so a guest cannot mask the host's interrupt source.
-	 * No virtual interrupt is injected here; that requires a userland GIC.
 	 */
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
+	if (READ_ONCE(vcpu->vc_intr) != 0)
+		run->avr_hcr_el2 |= HCR_VI;
 	if (arm64_has_el2 == 2)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;
@@ -571,7 +604,7 @@ vm_run(struct vm_run_params *vrp)
 	}
 	WRITE_ONCE(vcpu->vc_curcpu, NULL);
 
-	vrp->vrp_irqready = 0;
+	vrp->vrp_irqready = (vcpu->vc_regs.vrs_pstate & PSR_I) == 0;
 	if (copyout(&vcpu->vc_exit, vrp->vrp_exit,
 	    sizeof(vcpu->vc_exit)) != 0)
 		error = EFAULT;
