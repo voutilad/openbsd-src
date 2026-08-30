@@ -5,15 +5,18 @@ regress:
 	@echo SKIPPED
 .else
 
-PROGS =			vcpu preempt
+PROGS =			vcpu preempt inject
 WARNINGS =		yes
 
-REGRESS_TARGETS =	run-regress-vcpu run-regress-preempt
+REGRESS_TARGETS =	run-regress-vcpu run-regress-preempt run-regress-inject
 run-regress-vcpu: vcpu
 	${SUDO} ./vcpu
 
 run-regress-preempt: preempt
 	${SUDO} ./preempt
+
+run-regress-inject: inject
+	${SUDO} ./inject
 
 .if ! (make(clean) || make(cleandir) || make(obj))
 .include <bsd.own.mk>
