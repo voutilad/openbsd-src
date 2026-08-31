@@ -107,6 +107,7 @@ member	avr_mair_el1
 member	avr_vbar_el1
 member	avr_contextidr_el1
 member	avr_cpacr_el1
+member	avr_cntkctl_el1
 member	avr_tpidr_el0
 member	avr_tpidrro_el0
 member	avr_tpidr_el1
@@ -121,6 +122,7 @@ member	avr_mode
 member	avr_exit
 member	avr_flush_tlb
 member	avr_cntvoff_el2
+member	avr_cnthctl_el2
 member	avr_host_sp
 member	avr_host_sp_el0
 member	avr_host_pc
@@ -137,9 +139,11 @@ member	avr_host_mair_el1
 member	avr_host_vbar_el1
 member	avr_host_contextidr_el1
 member	avr_host_cpacr_el1
+member	avr_host_cntkctl_el1
 member	avr_host_tpidr_el0
 member	avr_host_tpidrro_el0
 member	avr_host_tpidr_el1
 member	avr_host_cntvoff_el2
+member	avr_host_cnthctl_el2
 member	avr_host_hcr_el2
 member	avr_host_ich_hcr_el2

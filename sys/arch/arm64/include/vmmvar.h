@@ -105,6 +105,7 @@ struct vcpu_reg_state {
 	uint64_t			vrs_vbar_el1;
 	uint64_t			vrs_contextidr_el1;
 	uint64_t			vrs_cpacr_el1;
+	uint64_t			vrs_cntkctl_el1;
 
 	/* Thread identifiers visible at EL0 and EL1. */
 	uint64_t			vrs_tpidr_el0;
@@ -208,6 +209,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_vbar_el1;
 	uint64_t	avr_contextidr_el1;
 	uint64_t	avr_cpacr_el1;
+	uint64_t	avr_cntkctl_el1;
 	uint64_t	avr_tpidr_el0;
 	uint64_t	avr_tpidrro_el0;
 	uint64_t	avr_tpidr_el1;
@@ -228,6 +230,8 @@ struct arm64_vmm_run {
 	/* Invalidate this VMID's cached stage-2 translations before entry. */
 	uint64_t	avr_flush_tlb;
 	uint64_t	avr_cntvoff_el2;
+	/* Trap guest timer programming while leaving CNTVCT_EL0 readable. */
+	uint64_t	avr_cnthctl_el2;
 
 	/* Host state overwritten while the guest context is installed. */
 	uint64_t	avr_host_sp;
@@ -246,10 +250,12 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_vbar_el1;
 	uint64_t	avr_host_contextidr_el1;
 	uint64_t	avr_host_cpacr_el1;
+	uint64_t	avr_host_cntkctl_el1;
 	uint64_t	avr_host_tpidr_el0;
 	uint64_t	avr_host_tpidrro_el0;
 	uint64_t	avr_host_tpidr_el1;
 	uint64_t	avr_host_cntvoff_el2;
+	uint64_t	avr_host_cnthctl_el2;
 	uint64_t	avr_host_hcr_el2;
 	/* ICH_HCR_EL2 belongs to the host CPU and must survive each run. */
 	uint64_t	avr_host_ich_hcr_el2;

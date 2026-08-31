@@ -80,6 +80,7 @@
 #define	CNTHCTL_EVNTEN		(1 << 2) /* Enable event stream */
 #define	CNTHCTL_EL1PCEN		(1 << 1) /* Allow EL0/1 physical timer access */
 #define	CNTHCTL_EL1PCTEN	(1 << 0) /*Allow EL0/1 physical counter access*/
+#define	CNTHCTL_EL1TVT		(1 << 13) /* Trap EL1 virtual timer registers */
 
 /* CNTKCTL_EL1 - Counter-timer Kernel Control Register */
 #define	CNTKCTL_EL0VCTEN	(1 << 1) /* Allow EL0 virtual counter access */

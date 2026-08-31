@@ -459,6 +459,7 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	run->avr_vbar_el1 = vrs->vrs_vbar_el1;
 	run->avr_contextidr_el1 = vrs->vrs_contextidr_el1;
 	run->avr_cpacr_el1 = vrs->vrs_cpacr_el1;
+	run->avr_cntkctl_el1 = vrs->vrs_cntkctl_el1;
 	run->avr_tpidr_el0 = vrs->vrs_tpidr_el0;
 	run->avr_tpidrro_el0 = vrs->vrs_tpidrro_el0;
 	run->avr_tpidr_el1 = vrs->vrs_tpidr_el1;
@@ -495,6 +496,8 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;
 	run->avr_cntvoff_el2 = 0;
+	/* vmd emulates CNTV_{TVAL,CVAL,CTL}; CNTVCT remains a native read. */
+	run->avr_cnthctl_el2 = CNTHCTL_EL1TVT;
 }
 
 static void
@@ -520,6 +523,7 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 	vrs->vrs_vbar_el1 = run->avr_vbar_el1;
 	vrs->vrs_contextidr_el1 = run->avr_contextidr_el1;
 	vrs->vrs_cpacr_el1 = run->avr_cpacr_el1;
+	vrs->vrs_cntkctl_el1 = run->avr_cntkctl_el1;
 	vrs->vrs_tpidr_el0 = run->avr_tpidr_el0;
 	vrs->vrs_tpidrro_el0 = run->avr_tpidrro_el0;
 	vrs->vrs_tpidr_el1 = run->avr_tpidr_el1;

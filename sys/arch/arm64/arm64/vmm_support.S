@@ -94,6 +94,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el1
 	str	x0, [x17, #AVR_HOST_CPACR_EL1]
+	mrs	x0, cntkctl_el1
+	str	x0, [x17, #AVR_HOST_CNTKCTL_EL1]
 	mrs	x0, tpidr_el0
 	str	x0, [x17, #AVR_HOST_TPIDR_EL0]
 	mrs	x0, tpidrro_el0
@@ -102,6 +104,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_TPIDR_EL1]
 	mrs	x0, cntvoff_el2
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
+	mrs	x0, cnthctl_el2
+	str	x0, [x17, #AVR_HOST_CNTHCTL_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 	/* ICH_HCR_EL2 is per-CPU EL2 state, not part of the guest EL1 bank. */
@@ -159,6 +163,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	contextidr_el12, x0
 	ldr	x0, [x17, #AVR_CPACR_EL1]
 	msr	cpacr_el12, x0
+	ldr	x0, [x17, #AVR_CNTKCTL_EL1]
+	msr	cntkctl_el12, x0
 	ldr	x0, [x17, #AVR_ELR_EL1]
 	msr	elr_el12, x0
 	ldr	x0, [x17, #AVR_SPSR_EL1]
@@ -177,6 +183,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	tpidr_el1, x0
 	ldr	x0, [x17, #AVR_CNTVOFF_EL2]
 	msr	cntvoff_el2, x0
+	ldr	x0, [x17, #AVR_CNTHCTL_EL2]
+	msr	cnthctl_el2, x0
 	ldr	x0, [x17, #AVR_SP]
 	msr	sp_el1, x0
 	ldr	x0, [x17, #AVR_PC]
@@ -281,6 +289,8 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el1
 	str	x0, [x17, #AVR_HOST_CPACR_EL1]
+	mrs	x0, cntkctl_el1
+	str	x0, [x17, #AVR_HOST_CNTKCTL_EL1]
 	mrs	x0, tpidr_el0
 	str	x0, [x17, #AVR_HOST_TPIDR_EL0]
 	mrs	x0, tpidrro_el0
@@ -289,6 +299,8 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_TPIDR_EL1]
 	mrs	x0, cntvoff_el2
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
+	mrs	x0, cnthctl_el2
+	str	x0, [x17, #AVR_HOST_CNTHCTL_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 	/* Preserve the outer host's virtual-interface policy across nesting. */
@@ -333,6 +345,8 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	contextidr_el1, x0
 	ldr	x0, [x17, #AVR_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x17, #AVR_CNTKCTL_EL1]
+	msr	cntkctl_el1, x0
 	ldr	x0, [x17, #AVR_ELR_EL1]
 	msr	elr_el1, x0
 	ldr	x0, [x17, #AVR_SPSR_EL1]
@@ -351,6 +365,8 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	tpidr_el1, x0
 	ldr	x0, [x17, #AVR_CNTVOFF_EL2]
 	msr	cntvoff_el2, x0
+	ldr	x0, [x17, #AVR_CNTHCTL_EL2]
+	msr	cnthctl_el2, x0
 
 	ldr	x0, [x17, #AVR_SP]
 	msr	sp_el1, x0
@@ -491,6 +507,8 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el1
 	str	x0, [x18, #AVR_CPACR_EL1]
+	mrs	x0, cntkctl_el1
+	str	x0, [x18, #AVR_CNTKCTL_EL1]
 	mrs	x0, tpidr_el1
 	str	x0, [x18, #AVR_TPIDR_EL1]
 	b	.Lsave_guest_done
@@ -521,6 +539,8 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_CONTEXTIDR_EL1]
 	mrs	x0, cpacr_el12
 	str	x0, [x18, #AVR_CPACR_EL1]
+	mrs	x0, cntkctl_el12
+	str	x0, [x18, #AVR_CNTKCTL_EL1]
 	mrs	x0, tpidr_el1
 	str	x0, [x18, #AVR_TPIDR_EL1]
 
@@ -563,6 +583,8 @@ END(vmm_hyp_serror)
 	msr	contextidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_CNTKCTL_EL1]
+	msr	cntkctl_el1, x0
 	ldr	x0, [x18, #AVR_HOST_ELR_EL1]
 	msr	elr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_SPSR_EL1]
@@ -581,6 +603,8 @@ END(vmm_hyp_serror)
 	msr	tpidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
 	msr	cntvoff_el2, x0
+	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
+	msr	cnthctl_el2, x0
 	ldr	x0, [x18, #AVR_HOST_SCTLR_EL1]
 	msr	sctlr_el1, x0
 	isb
@@ -614,6 +638,8 @@ END(vmm_hyp_serror)
 	msr	contextidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CPACR_EL1]
 	msr	cpacr_el1, x0
+	ldr	x0, [x18, #AVR_HOST_CNTKCTL_EL1]
+	msr	cntkctl_el1, x0
 	ldr	x0, [x18, #AVR_HOST_SP_EL0]
 	msr	sp_el0, x0
 	ldr	x0, [x18, #AVR_HOST_TPIDR_EL0]
@@ -624,6 +650,8 @@ END(vmm_hyp_serror)
 	msr	tpidr_el1, x0
 	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
 	msr	cntvoff_el2, x0
+	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
+	msr	cnthctl_el2, x0
 	/* ERET lands on .Lvhe_return with the original DAIF and NZCV restored. */
 	ldr	x0, [x18, #AVR_HOST_PC]
 	msr	elr_el2, x0

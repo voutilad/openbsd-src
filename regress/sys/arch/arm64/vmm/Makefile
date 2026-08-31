@@ -5,11 +5,11 @@ regress:
 	@echo SKIPPED
 .else
 
-PROGS =			vcpu preempt inject sysreg
+PROGS =			vcpu preempt inject sysreg timer
 WARNINGS =		yes
 
 REGRESS_TARGETS =	run-regress-vcpu run-regress-preempt run-regress-inject \
-			run-regress-sysreg
+			run-regress-sysreg run-regress-timer
 run-regress-vcpu: vcpu
 	${SUDO} ./vcpu
 
@@ -21,6 +21,9 @@ run-regress-inject: inject
 
 run-regress-sysreg: sysreg
 	${SUDO} ./sysreg
+
+run-regress-timer: timer
+	${SUDO} ./timer
 
 .if ! (make(clean) || make(cleandir) || make(obj))
 .include <bsd.own.mk>
