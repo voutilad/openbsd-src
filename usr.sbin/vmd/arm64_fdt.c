@@ -52,6 +52,10 @@ struct arm64_fdt_strings {
 	char	model[sizeof("model")];
 	char	device_type[sizeof("device_type")];
 	char	reg[sizeof("reg")];
+	char	interrupt_cells[sizeof("#interrupt-cells")];
+	char	interrupt_controller[sizeof("interrupt-controller")];
+	char	interrupt_parent[sizeof("interrupt-parent")];
+	char	phandle[sizeof("phandle")];
 	char	stdout_path[sizeof("stdout-path")];
 	char	status[sizeof("status")];
 };
@@ -63,6 +67,10 @@ static const struct arm64_fdt_strings arm64_fdt_strings = {
 	.model = "model",
 	.device_type = "device_type",
 	.reg = "reg",
+	.interrupt_cells = "#interrupt-cells",
+	.interrupt_controller = "interrupt-controller",
+	.interrupt_parent = "interrupt-parent",
+	.phandle = "phandle",
 	.stdout_path = "stdout-path",
 	.status = "status"
 };
@@ -74,6 +82,7 @@ static int	fdt_begin_node(struct fdt_writer *, const char *);
 static int	fdt_end_node(struct fdt_writer *);
 static int	fdt_prop(struct fdt_writer *, uint32_t, const void *,
 		    size_t);
+static int	fdt_prop_gic_reg(struct fdt_writer *);
 static int	fdt_prop_reg(struct fdt_writer *, uint64_t, uint64_t);
 static int	fdt_prop_string(struct fdt_writer *, uint32_t,
 		    const char *);
@@ -170,6 +179,23 @@ fdt_prop_reg(struct fdt_writer *w, uint64_t addr, uint64_t size)
 }
 
 static int
+fdt_prop_gic_reg(struct fdt_writer *w)
+{
+	uint32_t cells[8];
+
+	/* GICv3 requires a Distributor tuple followed by its Redistributor. */
+	cells[0] = htobe32(ARM64_GICD_BASE >> 32);
+	cells[1] = htobe32(ARM64_GICD_BASE);
+	cells[2] = htobe32(ARM64_GICD_SIZE >> 32);
+	cells[3] = htobe32(ARM64_GICD_SIZE);
+	cells[4] = htobe32(ARM64_GICR_BASE >> 32);
+	cells[5] = htobe32(ARM64_GICR_BASE);
+	cells[6] = htobe32(ARM64_GICR_SIZE >> 32);
+	cells[7] = htobe32(ARM64_GICR_SIZE);
+	return (fdt_prop(w, FDT_NAMEOFF(reg), cells, sizeof(cells)));
+}
+
+static int
 fdt_prop_string(struct fdt_writer *w, uint32_t nameoff, const char *value)
 {
 	return (fdt_prop(w, nameoff, value, strlen(value) + 1));
@@ -177,9 +203,9 @@ fdt_prop_string(struct fdt_writer *w, uint32_t nameoff, const char *value)
 
 /*
  * Build the deliberately small platform description used by the first arm64
- * vmd backend.  There is one CPU, one contiguous RAM range, and one polling
- * PL011.  No interrupt-parent, clocks, GIC, storage, or network nodes are
- * claimed before the corresponding device models exist.
+ * vmd backend.  There is one CPU, one contiguous RAM range, a GICv3 with one
+ * Redistributor, and one polling PL011.  The UART has no interrupts property,
+ * so the table does not claim interrupt-driven serial I/O before it exists.
  *
  * The last 16KB stage-2 page is firmware-owned.  It contains this DTB and is
  * omitted from /memory so a future guest allocator cannot recycle the blob.
@@ -223,7 +249,8 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_prop_string(&w, FDT_NAMEOFF(model),
 	    "OpenBSD vmd arm64") == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(compatible),
-	    "openbsd,vmd-arm64") == -1)
+	    "openbsd,vmd-arm64") == -1 ||
+	    fdt_prop_u32(&w, FDT_NAMEOFF(interrupt_parent), 1) == -1)
 		goto nospc;
 
 	if (fdt_begin_node(&w, "chosen") == -1 ||
@@ -246,6 +273,16 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_prop(&w, FDT_NAMEOFF(reg), cpu_reg, sizeof(cpu_reg)) == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(status), "okay") == -1 ||
 	    fdt_end_node(&w) == -1 || fdt_end_node(&w) == -1)
+		goto nospc;
+
+	if (fdt_begin_node(&w, "intc@8000000") == -1 ||
+	    fdt_prop_string(&w, FDT_NAMEOFF(compatible), "arm,gic-v3") == -1 ||
+	    fdt_prop_u32(&w, FDT_NAMEOFF(interrupt_cells), 3) == -1 ||
+	    fdt_prop(&w, FDT_NAMEOFF(interrupt_controller), NULL, 0) == -1 ||
+	    fdt_prop_gic_reg(&w) == -1 ||
+	    fdt_prop_u32(&w, FDT_NAMEOFF(phandle), 1) == -1 ||
+	    fdt_prop_string(&w, FDT_NAMEOFF(status), "okay") == -1 ||
+	    fdt_end_node(&w) == -1)
 		goto nospc;
 
 	if (fdt_begin_node(&w, "uart@9000000") == -1 ||
