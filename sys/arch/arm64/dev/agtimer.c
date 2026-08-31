@@ -41,6 +41,7 @@
 
 #define TIMER_FREQUENCY		24 * 1000 * 1000 /* ARM core clock */
 int32_t agtimer_frequency = TIMER_FREQUENCY;
+int agtimer_physical;
 
 u_int agtimer_get_timecount_default(struct timecounter *);
 u_int agtimer_get_timecount_sun50i(struct timecounter *);
@@ -141,7 +142,10 @@ agtimer_get_ctrl(void)
 {
 	uint32_t val;
 
-	__asm volatile("mrs %x0, CNTV_CTL_EL0" : "=r" (val));
+	if (agtimer_physical)
+		__asm volatile("mrs %x0, CNTP_CTL_EL0" : "=r" (val));
+	else
+		__asm volatile("mrs %x0, CNTV_CTL_EL0" : "=r" (val));
 
 	return (val);
 }
@@ -149,7 +153,10 @@ agtimer_get_ctrl(void)
 static inline int
 agtimer_set_ctrl(uint32_t val)
 {
-	__asm volatile("msr CNTV_CTL_EL0, %x0" :: "r" (val));
+	if (agtimer_physical)
+		__asm volatile("msr CNTP_CTL_EL0, %x0" :: "r" (val));
+	else
+		__asm volatile("msr CNTV_CTL_EL0, %x0" :: "r" (val));
 	__asm volatile("isb" ::: "memory");
 
 	return (0);
@@ -158,7 +165,10 @@ agtimer_set_ctrl(uint32_t val)
 static inline int
 agtimer_set_tval(uint32_t val)
 {
-	__asm volatile("msr CNTV_TVAL_EL0, %x0" :: "r" (val));
+	if (agtimer_physical)
+		__asm volatile("msr CNTP_TVAL_EL0, %x0" :: "r" (val));
+	else
+		__asm volatile("msr CNTV_TVAL_EL0, %x0" :: "r" (val));
 	__asm volatile("isb" ::: "memory");
 
 	return (0);
@@ -180,6 +190,8 @@ agtimer_attach(struct device *parent, struct device *self, void *aux)
 	struct fdt_attach_args *faa = aux;
 
 	sc->sc_node = faa->fa_node;
+	agtimer_physical = OF_getpropbool(sc->sc_node,
+	    "openbsd,physical-timer");
 
 	if (agtimer_get_freq() != 0)
 		agtimer_frequency = agtimer_get_freq();
@@ -303,7 +315,11 @@ agtimer_cpu_initclocks(void)
 
 	/* Pick the correct PPI depending on the running EL. */
 	el = READ_SPECIALREG(CurrentEL) & CURRENTEL_EL_MASK;
-	if (el == CURRENTEL_EL_EL2) {
+	if (agtimer_physical) {
+		idx = OF_getindex(sc->sc_node, "phys", "interrupt-names");
+		if (idx == -1)
+			idx = 1;
+	} else if (el == CURRENTEL_EL_EL2) {
 		idx = OF_getindex(sc->sc_node, "hyp-virt", "interrupt-names");
 		if (idx == -1)
 			idx = 4;
@@ -313,7 +329,7 @@ agtimer_cpu_initclocks(void)
 			idx = 2;
 	}
 
-	/* configure virtual timer interrupt */
+	/* Configure the timer interrupt selected above. */
 	sc->sc_ih = arm_intr_establish_fdt_idx(sc->sc_node, idx,
 	    IPL_CLOCK|IPL_MPSAFE, agtimer_intr, NULL, "tick");
 }
