@@ -54,13 +54,13 @@
 #define VTTBR_VMID_SHIFT	48
 #define VMM_S2_PAGE_SIZE	(4 * PAGE_SIZE)
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
+#define VMM_S2_FAULT_SIZE	(2 * 1024 * 1024)
 
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t);
 
 static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
-static int	arm64_vmm_memtype(struct vm *, paddr_t);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static void	arm64_vmm_load_run(struct vcpu *);
@@ -349,25 +349,6 @@ vm_rwvmparams(struct vm_rwvmparams_params *vpp, int dir)
 	return (EOPNOTSUPP);
 }
 
-static int
-arm64_vmm_memtype(struct vm *vm, paddr_t gpa)
-{
-	struct vm_mem_range *vmr;
-	int i;
-
-	for (i = 0; i < vm->vm_nmemranges; i++) {
-		vmr = &vm->vm_memranges[i];
-		if (gpa < vmr->vmr_gpa)
-			break;
-		if (gpa < vmr->vmr_gpa + vmr->vmr_size) {
-			if (vmr->vmr_type == VM_MEM_MMIO)
-				return (VMM_MEM_TYPE_MMIO);
-			return (VMM_MEM_TYPE_REGULAR);
-		}
-	}
-	return (VMM_MEM_TYPE_UNKNOWN);
-}
-
 static vaddr_t
 arm64_vmm_translate_gpa(struct vm *vm, paddr_t gpa)
 {
@@ -388,39 +369,62 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 {
 	struct proc *p = curproc;
 	struct arm64_vmm_run *run;
-	paddr_t hpa, mapped, ipa = trunc_page(gpa);
-	paddr_t ipa_base = ipa & ~VMM_S2_PAGE_MASK;
+	struct vm_mem_range *vmr = NULL;
+	paddr_t hpa, ipa, ipa_base, ipa_end, mapped, pa;
 	vaddr_t hva;
 	int error, i;
+
+	ipa = trunc_page(gpa);
 
 	if (pmap_extract(vcpu->vc_parent->vm_pmap, ipa, &mapped))
 		return (0);
 
 	/*
-	 * The hardware stage-2 granule is 16KB even though OpenBSD pages are
-	 * 4KB.  Fault and install the complete aligned group so one hardware
-	 * descriptor always covers four contiguous host pages.
+	 * Locate the RAM slot containing the fault before calculating the
+	 * read-ahead window.  Clipping the window to that slot prevents a fault
+	 * near its edge from wiring an adjacent MMIO hole or a different object.
 	 */
-	if (arm64_vmm_memtype(vcpu->vc_parent, ipa_base) !=
-	    VMM_MEM_TYPE_REGULAR)
+	for (i = 0; i < vcpu->vc_parent->vm_nmemranges; i++) {
+		vmr = &vcpu->vc_parent->vm_memranges[i];
+		if (ipa >= vmr->vmr_gpa &&
+		    ipa < vmr->vmr_gpa + vmr->vmr_size)
+			break;
+	}
+	if (i == vcpu->vc_parent->vm_nmemranges ||
+	    vmr->vmr_type == VM_MEM_MMIO)
 		return (EFAULT);
-	if (arm64_vmm_memtype(vcpu->vc_parent,
-	    ipa_base + VMM_S2_PAGE_SIZE - PAGE_SIZE) != VMM_MEM_TYPE_REGULAR)
-		return (EFAULT);
+
+	/*
+	 * The backing allocator supplies physically contiguous, aligned 16KB
+	 * groups.  Map up to 2MB of those groups for each stage-2 fault.  Early
+	 * arm64 bootstrap touches page-table metadata sequentially; installing
+	 * only the faulting group would otherwise require one nested exception
+	 * and one VM-wide stage-2 TLBI every 16KB.  The larger bounded window
+	 * amortizes those exits without wiring untouched RAM for the whole VM.
+	 */
+	ipa_base = ipa & ~(VMM_S2_FAULT_SIZE - 1);
+	if (ipa_base < vmr->vmr_gpa)
+		ipa_base = vmr->vmr_gpa;
+	ipa_end = ipa_base + VMM_S2_FAULT_SIZE;
+	if (ipa_end > vmr->vmr_gpa + vmr->vmr_size)
+		ipa_end = vmr->vmr_gpa + vmr->vmr_size;
+	KASSERT((ipa_base & VMM_S2_PAGE_MASK) == 0);
+	KASSERT((ipa_end & VMM_S2_PAGE_MASK) == 0);
+
 	hva = arm64_vmm_translate_gpa(vcpu->vc_parent, ipa_base);
 	if (hva == 0)
 		return (EFAULT);
 
 	error = uvm_fault_wire(&p->p_vmspace->vm_map, hva,
-	    hva + VMM_S2_PAGE_SIZE, PROT_READ | PROT_WRITE);
+	    hva + (ipa_end - ipa_base), PROT_READ | PROT_WRITE);
 	if (error)
 		return (error);
-	for (i = 0; i < VMM_S2_PAGE_SIZE / PAGE_SIZE; i++) {
+	for (pa = ipa_base; pa < ipa_end; pa += PAGE_SIZE, hva += PAGE_SIZE) {
 		if (!pmap_extract(p->p_vmspace->vm_map.pmap,
-		    hva + i * PAGE_SIZE, &hpa))
+		    hva, &hpa))
 			return (EFAULT);
 		error = pmap_enter(vcpu->vc_parent->vm_pmap,
-		    ipa_base + i * PAGE_SIZE, hpa,
+		    pa, hpa,
 		    PROT_READ | PROT_WRITE | PROT_EXEC,
 		    PROT_READ | PROT_WRITE | PROT_EXEC);
 		if (error)
