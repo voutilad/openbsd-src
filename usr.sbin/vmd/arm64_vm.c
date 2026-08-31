@@ -30,6 +30,7 @@
 #include "vmd.h"
 #include "vmm.h"
 #include "arm64_vm.h"
+#include "gicv3.h"
 #include "pl011.h"
 
 #define EXCP_DATA_ABORT_L	0x24
@@ -46,6 +47,7 @@ static int	arm64_write_regs(struct vm_run_params *);
 static int	load_payload_elf(gzFile, struct vmd_vm *,
 		    struct vcpu_reg_state *);
 static int	vcpu_exit_mmio(struct vm_run_params *);
+static int	vcpu_exit_sysreg(struct vm_run_params *);
 
 void
 create_memory_map(struct vmd_vm *vm)
@@ -66,16 +68,22 @@ create_memory_map(struct vmd_vm *vm)
 
 	/*
 	 * vmm(4) requires ascending, non-overlapping guest-physical ranges.
-	 * VM_MEM_MMIO reserves an IPA aperture but allocates no backing memory;
-	 * accesses therefore exit to this process for PL011 emulation.
+	 * VM_MEM_MMIO reserves IPA apertures but allocates no backing memory;
+	 * accesses therefore exit to this process for GICv3 or PL011 emulation.
 	 */
-	vmc->vmc_memranges[0].vmr_gpa = ARM64_UART_BASE;
-	vmc->vmc_memranges[0].vmr_size = ARM64_UART_SIZE;
+	vmc->vmc_memranges[0].vmr_gpa = ARM64_GICD_BASE;
+	vmc->vmc_memranges[0].vmr_size = ARM64_GICD_SIZE;
 	vmc->vmc_memranges[0].vmr_type = VM_MEM_MMIO;
-	vmc->vmc_memranges[1].vmr_gpa = ARM64_RAM_BASE;
-	vmc->vmc_memranges[1].vmr_size = memsize;
-	vmc->vmc_memranges[1].vmr_type = VM_MEM_RAM;
-	vmc->vmc_nmemranges = 2;
+	vmc->vmc_memranges[1].vmr_gpa = ARM64_GICR_BASE;
+	vmc->vmc_memranges[1].vmr_size = ARM64_GICR_SIZE;
+	vmc->vmc_memranges[1].vmr_type = VM_MEM_MMIO;
+	vmc->vmc_memranges[2].vmr_gpa = ARM64_UART_BASE;
+	vmc->vmc_memranges[2].vmr_size = ARM64_UART_SIZE;
+	vmc->vmc_memranges[2].vmr_type = VM_MEM_MMIO;
+	vmc->vmc_memranges[3].vmr_gpa = ARM64_RAM_BASE;
+	vmc->vmc_memranges[3].vmr_size = memsize;
+	vmc->vmc_memranges[3].vmr_type = VM_MEM_RAM;
+	vmc->vmc_nmemranges = 4;
 }
 
 int
@@ -183,7 +191,7 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 
 	/*
 	 * Enter at EL1h with the MMU off.  Masking DAIF is important until a
-	 * guest installs exception vectors and, later, a GIC.  SCTLR_RES1 is
+	 * guest installs exception vectors and configures the GIC.  SCTLR_RES1 is
 	 * the architecturally valid disabled-MMU value used by vmm(4)'s reset
 	 * path.  x2 contains the guest-physical FDT address expected by the
 	 * OpenBSD arm64 kernel ABI; all other general registers are zero.
@@ -213,13 +221,14 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 	(void)child_disks;
 	(void)child_taps;
 
-	/* Keep this first backend honest: the PL011 is its only device. */
+	/* Keep this first backend honest: it has only a GIC and polling PL011. */
 	if (vm->vm_params.vmc_ndisks != 0 ||
 	    vm->vm_params.vmc_nnics != 0 || vm->vm_cdrom != -1) {
 		log_warnx("arm64 guests do not yet support storage or network "
 		    "devices");
 		return (EOPNOTSUPP);
 	}
+	gicv3_init(vm->vm_vmmid);
 	pl011_init(con_fd);
 	return (0);
 }
@@ -302,7 +311,7 @@ read_mem(paddr_t src, void *buf, size_t len)
 int
 intr_pending(int vcpu_id)
 {
-	/* A userland GIC is intentionally outside this initial backend. */
+	/* The arm64 GIC drives VMM_IOC_INTR directly, not the x86 injection ABI. */
 	(void)vm;
 	return (0);
 }
@@ -319,7 +328,7 @@ intr_toggle_el(struct vmd_vm *vm, int irq, int val)
 int
 intr_ack(int vcpu_id)
 {
-	/* No userland interrupt controller can acknowledge an IRQ yet. */
+	/* The guest acknowledges an INTID by reading ICC_IAR1_EL1. */
 	(void)vm;
 	return (-1);
 }
@@ -327,19 +336,15 @@ intr_ack(int vcpu_id)
 void
 vcpu_assert_vector(int fd, uint32_t vcpu_id, uint8_t vector)
 {
-	/* Device-to-GIC routing will replace this stub in a later increment. */
-	(void)vm_id;
-	(void)vcpu_id;
-	(void)irq;
+	if (gicv3_set_irq(vm_id, vcpu_id, irq, 1) != 0)
+		log_warnx("failed to assert GICv3 INTID %d", irq);
 }
 
 void
 vcpu_assert_irq(int fd, uint32_t vcpu_id, int vector)
 {
-	/* Device-to-GIC routing will replace this stub in a later increment. */
-	(void)vm_id;
-	(void)vcpu_id;
-	(void)irq;
+	if (gicv3_set_irq(vm_id, vcpu_id, irq, 0) != 0)
+		log_warnx("failed to deassert GICv3 INTID %d", irq);
 }
 
 void
@@ -359,7 +364,17 @@ vcpu_exit(struct vm_run_params *vrp)
 	 */
 	switch (vrp->vrp_exit_reason) {
 	case VM_EXIT_EXCEPTION:
-		return (vcpu_exit_mmio(vrp));
+		switch (ESR_ELx_EXCEPTION(vrp->vrp_exit->vesr)) {
+		case EXCP_DATA_ABORT_L:
+			return (vcpu_exit_mmio(vrp));
+		case EXCP_MSR:
+			return (vcpu_exit_sysreg(vrp));
+		default:
+			log_warnx("unhandled arm64 exception: esr=0x%llx "
+			    "pc=0x%llx", vrp->vrp_exit->vesr,
+			    vrp->vrp_exit->vrs.vrs_pc);
+			return (EFAULT);
+		}
 	case VM_EXIT_HVC:
 	case VM_EXIT_WFX:
 		vcpu_halt(vrp->vrp_vcpu_id);
@@ -376,6 +391,12 @@ arm64_mmio_access(paddr_t gpa, size_t len, int write, uint64_t *data)
 {
 	uint32_t uart_data;
 	int error;
+
+	if ((gpa >= ARM64_GICD_BASE &&
+	    gpa - ARM64_GICD_BASE < ARM64_GICD_SIZE) ||
+	    (gpa >= ARM64_GICR_BASE &&
+	    gpa - ARM64_GICR_BASE < ARM64_GICR_SIZE))
+		return (gicv3_mmio(gpa, len, write, data));
 
 	/* PL011 exposes 32-bit registers even though the MMIO layer is wider. */
 	if (gpa >= ARM64_UART_BASE &&
@@ -476,6 +497,33 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 	if (!write && reg != 31)
 		vrs->vrs_gprs[reg] = data & mask;
 	/* AArch64 instructions are fixed at four bytes; finish the access once. */
+	vrs->vrs_pc += sizeof(uint32_t);
+	return (arm64_write_regs(vrp));
+}
+
+static int
+vcpu_exit_sysreg(struct vm_run_params *vrp)
+{
+	struct vm_exit *exit = vrp->vrp_exit;
+	struct vcpu_reg_state *vrs = &exit->vrs;
+	uint64_t data = 0, esr = exit->vesr;
+	u_int reg;
+	int error, read;
+
+	if ((esr & ESR_ELx_IL) == 0)
+		return (EFAULT);
+	reg = ISS_MSR_Rt(esr);
+	read = (esr & ISS_MSR_DIR) != 0;
+	if (!read && reg != 31)
+		data = vrs->vrs_gprs[reg];
+	error = gicv3_icc(esr, !read, &data);
+	if (error != 0) {
+		log_warnx("unhandled arm64 system register: esr=0x%llx "
+		    "pc=0x%llx", esr, vrs->vrs_pc);
+		return (error);
+	}
+	if (read && reg != 31)
+		vrs->vrs_gprs[reg] = data;
 	vrs->vrs_pc += sizeof(uint32_t);
 	return (arm64_write_regs(vrp));
 }
