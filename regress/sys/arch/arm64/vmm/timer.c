@@ -45,6 +45,7 @@
  *
  *     msr CNTKCTL_EL1, x3
  *     mrs x4, CNTKCTL_EL1
+ *     mrs x6, CNTPCT_EL0
  *     mrs x2, CNTP_CTL_EL0
  *     msr CNTP_TVAL_EL0, x5
  *     mov x0, #GUEST_RESULT
@@ -53,6 +54,7 @@
 static const uint32_t guest_code[] = {
 	0xd518e103,
 	0xd538e104,
+	0xd53be026,
 	0xd53be222,
 	0xd51be205,
 	0xd2800840,
@@ -200,12 +202,13 @@ main(void)
 		warnc(error, "run to CNTP_CTL_EL0 read");
 		goto out_alarm;
 	}
-	if (check_timer_exit(&run, 2 * sizeof(uint32_t), 1,
+	if (check_timer_exit(&run, 3 * sizeof(uint32_t), 1,
 	    VCPU_REGS_X2, 1) != 0)
 		goto out_alarm;
 	if (vmexit.vrs.vrs_cntkctl_el1 != CNTKCTL_EL0VCTEN ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != CNTKCTL_EL0VCTEN) {
-		warnx("CNTKCTL_EL1 was not preserved across entry");
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != CNTKCTL_EL0VCTEN ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X6] == 0) {
+		warnx("counter or CNTKCTL_EL1 was not preserved across entry");
 		goto out_alarm;
 	}
 	if ((error = complete_sysreg(fd, &run, 1, READ_VALUE)) != 0) {
@@ -217,7 +220,7 @@ main(void)
 		warnc(error, "run to CNTP_TVAL_EL0 write");
 		goto out_alarm;
 	}
-	if (check_timer_exit(&run, 3 * sizeof(uint32_t), 0,
+	if (check_timer_exit(&run, 4 * sizeof(uint32_t), 0,
 	    VCPU_REGS_X5, 0) != 0)
 		goto out_alarm;
 	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != READ_VALUE ||
