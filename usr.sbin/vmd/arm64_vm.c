@@ -41,7 +41,7 @@ extern struct vmd	*env;
 extern struct vmd_vm	*current_vm;
 extern int		 con_fd;
 
-static int	arm64_mmio_access(paddr_t, int, uint32_t *);
+static int	arm64_mmio_access(paddr_t, size_t, int, uint64_t *);
 static int	arm64_write_regs(struct vm_run_params *);
 static int	load_payload_elf(gzFile, struct vmd_vm *,
 		    struct vcpu_reg_state *);
@@ -372,12 +372,22 @@ vcpu_exit(struct vm_run_params *vrp)
 }
 
 static int
-arm64_mmio_access(paddr_t gpa, int write, uint32_t *data)
+arm64_mmio_access(paddr_t gpa, size_t len, int write, uint64_t *data)
 {
-	/* This address decoder deliberately contains only the UART aperture. */
+	uint32_t uart_data;
+	int error;
+
+	/* PL011 exposes 32-bit registers even though the MMIO layer is wider. */
 	if (gpa >= ARM64_UART_BASE &&
-	    gpa - ARM64_UART_BASE < ARM64_UART_SIZE)
-		return (pl011_mmio(gpa, write, data));
+	    gpa - ARM64_UART_BASE < ARM64_UART_SIZE) {
+		if (len != sizeof(uart_data))
+			return (EOPNOTSUPP);
+		uart_data = *data;
+		error = pl011_mmio(gpa, write, &uart_data);
+		if (!write)
+			*data = uart_data;
+		return (error);
+	}
 	log_warnx("unhandled arm64 MMIO access at 0x%lx", gpa);
 	return (EFAULT);
 }
@@ -411,7 +421,9 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 	struct vcpu_reg_state *vrs = &exit->vrs;
 	paddr_t gpa;
 	uint64_t esr = exit->vesr;
-	uint32_t data, reg, sas;
+	uint64_t data, mask;
+	uint32_t reg, sas;
+	size_t len;
 	int error, write;
 
 	/*
@@ -429,14 +441,18 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 	}
 
 	/*
-	 * For now accept only unsigned 32-bit W-register accesses.  This is
-	 * enough for normal PL011 register I/O and keeps sign extension and
-	 * 64-bit X-register completion out of this first slice.
+	 * A GICv3 uses byte priority registers, 32-bit control registers, and
+	 * 64-bit affinity-routing registers.  Accept unsigned accesses of all
+	 * architectural sizes and require the syndrome's register-width bit to
+	 * agree with the transfer.  Signed loads are not needed by either the
+	 * PL011 or GIC register interfaces.
 	 */
 	sas = (esr & ISS_DATA_SAS_MASK) >> ISS_DATA_SAS_SHIFT;
+	len = 1UL << sas;
 	reg = (esr & ISS_DATA_SRT_MASK) >> ISS_DATA_SRT_SHIFT;
 	write = (esr & ISS_DATA_WnR) != 0;
-	if (sas != 2 || (esr & (ISS_DATA_SSE | ISS_DATA_SF)) != 0) {
+	if ((esr & ISS_DATA_SSE) != 0 ||
+	    ((len == sizeof(uint64_t)) != ((esr & ISS_DATA_SF) != 0))) {
 		log_warnx("unsupported arm64 MMIO access: esr=0x%llx", esr);
 		return (EOPNOTSUPP);
 	}
@@ -451,13 +467,14 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 	    (exit->vfar & PAGE_MASK);
 	data = 0;
 	/* SRT==31 denotes WZR/XZR: writes are zero and loads are discarded. */
+	mask = (len == sizeof(uint64_t)) ? UINT64_MAX : (1UL << (len * 8)) - 1;
 	if (write && reg != 31)
-		data = vrs->vrs_gprs[reg];
-	error = arm64_mmio_access(gpa, write, &data);
+		data = vrs->vrs_gprs[reg] & mask;
+	error = arm64_mmio_access(gpa, len, write, &data);
 	if (error)
 		return (error);
 	if (!write && reg != 31)
-		vrs->vrs_gprs[reg] = data;
+		vrs->vrs_gprs[reg] = data & mask;
 	/* AArch64 instructions are fixed at four bytes; finish the access once. */
 	vrs->vrs_pc += sizeof(uint32_t);
 	return (arm64_write_regs(vrp));
