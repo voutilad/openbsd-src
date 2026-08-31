@@ -25,27 +25,31 @@
 
 /*
  * Enter EL2 with x0 holding the physical address of struct arm64_vmm_run.
- * All callee-saved registers are kept on the host EL1 stack; EL2 restores
- * that stack before returning here.
+ * OpenBSD keeps its per-CPU pointer in the platform register x18.  Preserve
+ * it along with the AAPCS64 callee-saved registers before the guest replaces
+ * the complete integer register file.  EL2 restores this stack before
+ * returning here.
  */
 ENTRY(arm64_vmm_enter_nvhe)
-	sub	sp, sp, #96
-	stp	x19, x20, [sp, #0]
-	stp	x21, x22, [sp, #16]
-	stp	x23, x24, [sp, #32]
-	stp	x25, x26, [sp, #48]
-	stp	x27, x28, [sp, #64]
-	stp	x29, x30, [sp, #80]
+	sub	sp, sp, #112
+	str	x18, [sp, #0]
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	stp	x23, x24, [sp, #48]
+	stp	x25, x26, [sp, #64]
+	stp	x27, x28, [sp, #80]
+	stp	x29, x30, [sp, #96]
 
 	hvc	#VMM_HVC_ENTER
 
-	ldp	x19, x20, [sp, #0]
-	ldp	x21, x22, [sp, #16]
-	ldp	x23, x24, [sp, #32]
-	ldp	x25, x26, [sp, #48]
-	ldp	x27, x28, [sp, #64]
-	ldp	x29, x30, [sp, #80]
-	add	sp, sp, #96
+	ldr	x18, [sp, #0]
+	ldp	x19, x20, [sp, #16]
+	ldp	x21, x22, [sp, #32]
+	ldp	x23, x24, [sp, #48]
+	ldp	x25, x26, [sp, #64]
+	ldp	x27, x28, [sp, #80]
+	ldp	x29, x30, [sp, #96]
+	add	sp, sp, #112
 	ret
 END(arm64_vmm_enter_nvhe)
 
@@ -55,13 +59,14 @@ END(arm64_vmm_enter_nvhe)
  * kernel virtual address in this mode.
  */
 ENTRY(arm64_vmm_enter_vhe)
-	sub	sp, sp, #96
-	stp	x19, x20, [sp, #0]
-	stp	x21, x22, [sp, #16]
-	stp	x23, x24, [sp, #32]
-	stp	x25, x26, [sp, #48]
-	stp	x27, x28, [sp, #64]
-	stp	x29, x30, [sp, #80]
+	sub	sp, sp, #112
+	str	x18, [sp, #0]
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	stp	x23, x24, [sp, #48]
+	stp	x25, x26, [sp, #64]
+	stp	x27, x28, [sp, #80]
+	stp	x29, x30, [sp, #96]
 
 	/*
 	 * Mask exceptions while the host snapshot and vmm vectors are only
@@ -220,13 +225,14 @@ ENTRY(arm64_vmm_enter_vhe)
 
 .Lvhe_return:
 	/* EL2 restored the stack and branch target; finish the C ABI return. */
-	ldp	x19, x20, [sp, #0]
-	ldp	x21, x22, [sp, #16]
-	ldp	x23, x24, [sp, #32]
-	ldp	x25, x26, [sp, #48]
-	ldp	x27, x28, [sp, #64]
-	ldp	x29, x30, [sp, #80]
-	add	sp, sp, #96
+	ldr	x18, [sp, #0]
+	ldp	x19, x20, [sp, #16]
+	ldp	x21, x22, [sp, #32]
+	ldp	x23, x24, [sp, #48]
+	ldp	x25, x26, [sp, #64]
+	ldp	x27, x28, [sp, #80]
+	ldp	x29, x30, [sp, #96]
+	add	sp, sp, #112
 	ret
 END(arm64_vmm_enter_vhe)
 
