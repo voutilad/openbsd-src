@@ -98,7 +98,8 @@ load_firmware(struct vmd_vm *vm, struct vcpu_reg_state *vrs)
  * Load the small, fixed-address ELF images used to exercise this initial
  * backend.  This is intentionally not an OpenBSD kernel loader: every
  * PT_LOAD segment must already name an address in guest RAM, and no
- * relocation, boot arguments, symbols, or firmware tables are provided.
+ * relocation, boot arguments, or symbols are provided.  A small FDT does
+ * describe the fixed platform and is passed in x2 using OpenBSD's arm64 ABI.
  */
 static int
 load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
@@ -107,7 +108,8 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	Elf64_Phdr ph;
 	struct vm_mem_range *ram;
 	void *mem;
-	uint64_t end, stack;
+	uint64_t end, fdt_gpa, ram_end, stack;
+	size_t fdt_size;
 	int entry_ok = 0, loaded = 0, nread;
 	unsigned int i;
 
@@ -115,6 +117,11 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	ram = find_gpa_range(&vm->vm_params, ARM64_RAM_BASE, 1);
 	if (ram == NULL || ram->vmr_type != VM_MEM_RAM)
 		goto bad;
+	if (ram->vmr_gpa > UINT64_MAX - ram->vmr_size ||
+	    ram->vmr_size <= ARM64_FDT_SIZE + 16)
+		goto bad;
+	ram_end = ram->vmr_gpa + ram->vmr_size;
+	fdt_gpa = ram_end - ARM64_FDT_SIZE;
 	if (gzrewind(fp) == -1 || gzread(fp, &eh, sizeof(eh)) != sizeof(eh))
 		goto bad;
 	/* Reject anything except a native, fixed-address AArch64 executable. */
@@ -144,6 +151,9 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		    ph.p_memsz > SIZE_MAX || ph.p_paddr > UINT64_MAX - ph.p_memsz)
 			goto bad;
 		end = ph.p_paddr + ph.p_memsz;
+		/* The top stage-2 page belongs to the firmware table, not ELF. */
+		if (end > fdt_gpa)
+			goto bad;
 		mem = hvaddr_mem(ph.p_paddr, ph.p_memsz);
 		if (mem == NULL)
 			goto bad;
@@ -164,25 +174,29 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		loaded = 1;
 	}
 	/* Require an aligned entry point inside an executable load segment. */
-	if (!loaded || !entry_ok || eh.e_entry % sizeof(uint32_t) != 0 ||
-	    ram->vmr_gpa > UINT64_MAX - ram->vmr_size || ram->vmr_size < 16)
+	if (!loaded || !entry_ok || eh.e_entry % sizeof(uint32_t) != 0)
+		goto bad;
+	mem = hvaddr_mem(fdt_gpa, ARM64_FDT_SIZE);
+	if (mem == NULL || arm64_fdt_build(mem, ARM64_FDT_SIZE,
+	    ram->vmr_size, &fdt_size) == -1)
 		goto bad;
 
 	/*
 	 * Enter at EL1h with the MMU off.  Masking DAIF is important until a
 	 * guest installs exception vectors and, later, a GIC.  SCTLR_RES1 is
 	 * the architecturally valid disabled-MMU value used by vmm(4)'s reset
-	 * path.  The payload ABI currently supplies only PC and a 16-byte-
-	 * aligned stack; x0-x30 are deliberately zero.
+	 * path.  x2 contains the guest-physical FDT address expected by the
+	 * OpenBSD arm64 kernel ABI; all other general registers are zero.
 	 */
-	stack = ram->vmr_gpa + ram->vmr_size;
+	stack = fdt_gpa;
 	memset(vrs, 0, sizeof(*vrs));
 	vrs->vrs_pc = eh.e_entry;
 	vrs->vrs_sp = (stack - 16) & ~0xfUL;
+	vrs->vrs_gprs[2] = fdt_gpa;
 	vrs->vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D | PSR_M_EL1h;
 	vrs->vrs_sctlr_el1 = SCTLR_RES1;
-	log_debug("%s: entry 0x%llx, stack 0x%llx", __func__,
-	    vrs->vrs_pc, vrs->vrs_sp);
+	log_debug("%s: entry 0x%llx, stack 0x%llx, FDT 0x%llx (%zu bytes)",
+	    __func__, vrs->vrs_pc, vrs->vrs_sp, fdt_gpa, fdt_size);
 	return (0);
 
 bad:

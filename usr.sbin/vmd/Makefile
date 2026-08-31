@@ -16,7 +16,7 @@ SRCS+=		psp.c sev.c
 SRCS+=		i82093aa.c lapic.c
 .endif # amd64
 .if ${MACHINE} == "arm64"
-SRCS+=		arm64_vm.c pl011.c
+SRCS+=		arm64_vm.c arm64_fdt.c pl011.c
 .endif # arm64
 
 CFLAGS+=	-Wall -I${.CURDIR}
