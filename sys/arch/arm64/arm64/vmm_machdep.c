@@ -54,7 +54,7 @@
 #define VTTBR_VMID_SHIFT	48
 #define VMM_S2_PAGE_SIZE	(4 * PAGE_SIZE)
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
-#define VMM_S2_FAULT_SIZE	(2 * 1024 * 1024)
+#define VMM_S2_FAULT_SIZE	(256 * 1024)
 
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t);
@@ -396,7 +396,7 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 
 	/*
 	 * The backing allocator supplies physically contiguous, aligned 16KB
-	 * groups.  Map up to 2MB of those groups for each stage-2 fault.  Early
+	 * groups.  Map up to 256KB of those groups for each stage-2 fault.  Early
 	 * arm64 bootstrap touches page-table metadata sequentially; installing
 	 * only the faulting group would otherwise require one nested exception
 	 * and one VM-wide stage-2 TLBI every 16KB.  The larger bounded window
