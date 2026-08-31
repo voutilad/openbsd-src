@@ -441,6 +441,7 @@ enum pipe_msg_type {
 	VIRTIO_THREAD_STOP,
 	VMMCI_SET_TIMEOUT_SHORT,
 	VMMCI_SET_TIMEOUT_LONG,
+	ARM64_TIMER_RESCHEDULE,
 };
 
 static inline struct sockaddr_in *

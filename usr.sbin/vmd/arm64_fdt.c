@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "arm64_vm.h"
+#include "arm64_timer.h"
 
 /*
  * An FDT has three variable-size areas after its header: a memory reservation
@@ -55,9 +56,13 @@ struct arm64_fdt_strings {
 	char	interrupt_cells[sizeof("#interrupt-cells")];
 	char	interrupt_controller[sizeof("interrupt-controller")];
 	char	interrupt_parent[sizeof("interrupt-parent")];
+	char	interrupts[sizeof("interrupts")];
+	char	interrupt_names[sizeof("interrupt-names")];
 	char	phandle[sizeof("phandle")];
 	char	stdout_path[sizeof("stdout-path")];
 	char	status[sizeof("status")];
+	char	clock_frequency[sizeof("clock-frequency")];
+	char	physical_timer[sizeof("openbsd,physical-timer")];
 };
 
 static const struct arm64_fdt_strings arm64_fdt_strings = {
@@ -70,9 +75,13 @@ static const struct arm64_fdt_strings arm64_fdt_strings = {
 	.interrupt_cells = "#interrupt-cells",
 	.interrupt_controller = "interrupt-controller",
 	.interrupt_parent = "interrupt-parent",
+	.interrupts = "interrupts",
+	.interrupt_names = "interrupt-names",
 	.phandle = "phandle",
 	.stdout_path = "stdout-path",
-	.status = "status"
+	.status = "status",
+	.clock_frequency = "clock-frequency",
+	.physical_timer = "openbsd,physical-timer"
 };
 
 #define FDT_NAMEOFF(_member) \
@@ -204,8 +213,9 @@ fdt_prop_string(struct fdt_writer *w, uint32_t nameoff, const char *value)
 /*
  * Build the deliberately small platform description used by the first arm64
  * vmd backend.  There is one CPU, one contiguous RAM range, a GICv3 with one
- * Redistributor, and one polling PL011.  The UART has no interrupts property,
- * so the table does not claim interrupt-driven serial I/O before it exists.
+ * Redistributor, a generic timer using the non-secure physical PPI, and one
+ * polling PL011.  The UART has no interrupts property, so the table does not
+ * claim interrupt-driven serial I/O before it exists.
  *
  * The last 16KB stage-2 page is firmware-owned.  It contains this DTB and is
  * omitted from /memory so a future guest allocator cannot recycle the blob.
@@ -219,6 +229,7 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	struct fdt_writer w;
 	struct fdt_head header;
 	uint32_t cpu_reg[2] = { 0, 0 };
+	uint32_t timer_interrupt[3];
 	uint64_t dtb_gpa, usable_ram;
 	size_t strings_off, struct_off, struct_size;
 
@@ -283,6 +294,22 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_prop_gic_reg(&w) == -1 ||
 	    fdt_prop_u32(&w, FDT_NAMEOFF(phandle), 1) == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(status), "okay") == -1 ||
+	    fdt_end_node(&w) == -1)
+		goto nospc;
+
+	/* GIC PPI 14 is architectural INTID 30, the non-secure physical timer. */
+	timer_interrupt[0] = htobe32(1);
+	timer_interrupt[1] = htobe32(ARM64_TIMER_INTID - 16);
+	timer_interrupt[2] = htobe32(4);
+	if (fdt_begin_node(&w, "timer") == -1 ||
+	    fdt_prop_string(&w, FDT_NAMEOFF(compatible),
+	    "arm,armv8-timer") == -1 ||
+	    fdt_prop(&w, FDT_NAMEOFF(interrupts), timer_interrupt,
+	    sizeof(timer_interrupt)) == -1 ||
+	    fdt_prop_string(&w, FDT_NAMEOFF(interrupt_names), "phys") == -1 ||
+	    fdt_prop_u32(&w, FDT_NAMEOFF(clock_frequency),
+	    ARM64_TIMER_FREQUENCY) == -1 ||
+	    fdt_prop(&w, FDT_NAMEOFF(physical_timer), NULL, 0) == -1 ||
 	    fdt_end_node(&w) == -1)
 		goto nospc;
 

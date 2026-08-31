@@ -60,9 +60,15 @@ typedef unsigned long usize;
 #define GICD_IROUTER	0x6000
 #define GICR_WAKER	0x00014
 #define  GICR_WAKER_PROCESSOR_SLEEP (1U << 1)
+#define GICR_IGROUPR0	0x10080
+#define GICR_ISENABLER0	0x10100
+#define GICR_IPRIORITYR	0x10400
 
 #define TEST_INTID	33
 #define TEST_INTID_BIT	(1U << (TEST_INTID - 32))
+#define TIMER_INTID	30
+#define TIMER_INTID_BIT	(1U << TIMER_INTID)
+#define TIMER_TICKS	240000
 #define GIC_SPURIOUS	1023
 
 struct gic_bases {
@@ -91,6 +97,7 @@ static int	blob_init(struct fdt_walk *, const void *);
 static int	bytes_equal(const u8 *, usize, const char *);
 static u32	get_be32(const void *);
 static int	find_gic(const void *, struct gic_bases *);
+static int	find_timer_intid(const void *);
 static u64	find_uart(const void *);
 static int	property_has_string(const u8 *, u32, const char *);
 static int	string_equal(const u8 *, const char *);
@@ -359,6 +366,41 @@ find_gic(const void *fdt, struct gic_bases *bases)
 	return (-1);
 }
 
+static int
+find_timer_intid(const void *fdt)
+{
+	struct fdt_item item;
+	struct fdt_walk walk;
+	u32 intid = 0;
+	int compatible = 0, in_timer = 0, physical = 0, rv;
+
+	if (blob_init(&walk, fdt) == -1)
+		return (-1);
+	while ((rv = walk_next(&walk, &item)) > 0) {
+		if (item.token == FDT_NODE_BEGIN && item.depth == 1) {
+			in_timer = string_equal(item.name, "timer");
+			compatible = physical = 0;
+			intid = 0;
+		} else if (item.token == FDT_PROPERTY && in_timer &&
+		    string_equal(item.name, "compatible")) {
+			compatible = property_has_string(item.data, item.len,
+			    "arm,armv8-timer");
+		} else if (item.token == FDT_PROPERTY && in_timer &&
+		    string_equal(item.name, "openbsd,physical-timer")) {
+			physical = 1;
+		} else if (item.token == FDT_PROPERTY && in_timer &&
+		    string_equal(item.name, "interrupts") && item.len >= 12 &&
+		    get_be32(item.data) == 1) {
+			intid = 16 + get_be32(item.data + 4);
+		} else if (item.token == FDT_NODE_END && item.depth == 1) {
+			if (in_timer && compatible && physical)
+				return (intid);
+			in_timer = 0;
+		}
+	}
+	return (-1);
+}
+
 static void
 uart_puts(u64 base, const char *s)
 {
@@ -405,6 +447,18 @@ write_icc_eoir1(u64 value)
 	__asm volatile("msr ICC_EOIR1_EL1, %x0" :: "r"(value) : "memory");
 }
 
+static void
+write_cntp_ctl(u64 value)
+{
+	__asm volatile("msr CNTP_CTL_EL0, %x0; isb" :: "r"(value) : "memory");
+}
+
+static void
+write_cntp_tval(u64 value)
+{
+	__asm volatile("msr CNTP_TVAL_EL0, %x0; isb" :: "r"(value) : "memory");
+}
+
 void
 guest_irq(void)
 {
@@ -413,6 +467,8 @@ guest_irq(void)
 	/* IAR returns and activates the selected INTID; EOIR deactivates it. */
 	iar = read_icc_iar1();
 	guest_intid = iar & 0xffffff;
+	if (guest_intid == TIMER_INTID)
+		write_cntp_ctl(0);
 	write_icc_eoir1(iar);
 }
 
@@ -420,20 +476,22 @@ void
 guest_main(const void *fdt)
 {
 	struct gic_bases gic;
-	volatile u8 *priority;
+	volatile u8 *priority, *rpriority;
 	volatile u32 *dist, *redist;
 	volatile u64 *router;
 	u32 config, waker;
 	u64 uart;
 
 	uart = find_uart(fdt);
-	if (uart == 0 || find_gic(fdt, &gic) == -1) {
+	if (uart == 0 || find_gic(fdt, &gic) == -1 ||
+	    find_timer_intid(fdt) != TIMER_INTID) {
 		uart_puts(FALLBACK_UART, "arm64 vmd FDT invalid\r\n");
 		return;
 	}
 	dist = (volatile u32 *)gic.dist;
 	redist = (volatile u32 *)gic.redist;
 	priority = (volatile u8 *)(gic.dist + GICD_IPRIORITYR);
+	rpriority = (volatile u8 *)(gic.redist + GICR_IPRIORITYR);
 	router = (volatile u64 *)(gic.dist + GICD_IROUTER);
 
 	/* Wake the one Redistributor and clear all old SPI state. */
@@ -473,4 +531,19 @@ guest_main(const void *fdt)
 		uart_puts(uart, "arm64 vmd FDT + GICv3 SPI interrupt works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd GICv3 returned wrong INTID\r\n");
+
+	/* Program the FDT-described physical timer as a level-triggered PPI. */
+	redist[GICR_IGROUPR0 / sizeof(u32)] |= TIMER_INTID_BIT;
+	rpriority[TIMER_INTID] = 0x80;
+	redist[GICR_ISENABLER0 / sizeof(u32)] = TIMER_INTID_BIT;
+	guest_intid = GIC_SPURIOUS;
+	write_cntp_ctl(0);
+	write_cntp_tval(TIMER_TICKS);
+	write_cntp_ctl(1);
+	while (guest_intid == GIC_SPURIOUS)
+		__asm volatile("wfi" ::: "memory");
+	if (guest_intid == TIMER_INTID)
+		uart_puts(uart, "arm64 vmd physical timer PPI works\r\n");
+	else
+		uart_puts(uart, "arm64 vmd timer returned wrong INTID\r\n");
 }

@@ -74,5 +74,7 @@ timeout 7 cat "${tty}" >"${console}" 2>&1 || true
 
 grep -q "arm64 vmd FDT + GICv3 SPI interrupt works" "${console}" ||
 	fail "guest did not take, acknowledge, and EOI the FDT-described GICv3 SPI"
+grep -q "arm64 vmd physical timer PPI works" "${console}" ||
+	fail "guest did not take and clear the FDT-described physical timer PPI"
 ${VMCTL} status "${vmname}" | grep -q "${vmname}" ||
 	fail "guest did not remain halted after HVC"

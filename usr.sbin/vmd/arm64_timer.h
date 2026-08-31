@@ -1,0 +1,29 @@
+/*	$OpenBSD$	*/
+/*
+ * Copyright (c) 2026 Dave Voutila <dv@openbsd.org>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+#ifndef _VMD_ARM64_TIMER_H_
+#define _VMD_ARM64_TIMER_H_
+
+#define ARM64_TIMER_FREQUENCY	24000000U
+#define ARM64_TIMER_INTID	30
+
+void	arm64_timer_init(uint32_t);
+void	arm64_timer_pause(void);
+void	arm64_timer_unpause(void);
+int	arm64_timer_sysreg(uint64_t, int, uint64_t *);
+
+#endif /* _VMD_ARM64_TIMER_H_ */

@@ -31,6 +31,7 @@
 #include "vmd.h"
 #include "vmm.h"
 #include "arm64_vm.h"
+#include "arm64_timer.h"
 #include "gicv3.h"
 #include "pl011.h"
 
@@ -296,6 +297,7 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 		return (EOPNOTSUPP);
 	}
 	gicv3_init(vm->vm_vmmid);
+	arm64_timer_init(vm->vm_vmmid);
 	pl011_init(con_fd);
 	return (0);
 }
@@ -303,15 +305,15 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 void
 pause_vm_md(struct vmd_vm *vm)
 {
-	/* No arm64 device in this slice owns a timer or worker to pause. */
 	(void)vm;
+	arm64_timer_pause();
 }
 
 void
 unpause_vm_md(struct vmd_vm *vm)
 {
-	/* See pause_vm_md(). */
 	(void)vm;
+	arm64_timer_unpause();
 }
 
 struct vm_mem_range *
@@ -423,6 +425,8 @@ vcpu_deassert_irq(int fd, uint32_t vcpu_id, int vector)
 int
 vcpu_exit(struct vm_run_params *vrp)
 {
+	int error;
+
 	/*
 	 * A stage-2 MMIO fault arrives as an exception exit.  HVC and trapped
 	 * WFI/WFE are safe idle points: park the vCPU thread instead of
@@ -443,7 +447,19 @@ vcpu_exit(struct vm_run_params *vrp)
 			return (EFAULT);
 		}
 	case VM_EXIT_HVC:
+		vcpu_halt(vrp->vrp_vcpu_id);
+		return (0);
 	case VM_EXIT_WFX:
+		/*
+		 * WFI/WFE is complete when vmm(4) reports it.  Leave the resume PC
+		 * after the instruction before parking, otherwise an IRQ taken while
+		 * waking the vCPU returns to the same WFI and immediately sleeps
+		 * again after the interrupt source has been cleared.
+		 */
+		vrp->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
+		error = arm64_write_regs(vrp);
+		if (error != 0)
+			return (error);
 		vcpu_halt(vrp->vrp_vcpu_id);
 		return (0);
 	default:
@@ -591,6 +607,8 @@ vcpu_exit_sysreg(struct vm_run_params *vrp)
 	if (!read && reg != 31)
 		data = vrs->vrs_gprs[reg];
 	error = gicv3_icc(esr, !read, &data);
+	if (error == ENOENT)
+		error = arm64_timer_sysreg(esr, !read, &data);
 	if (error != 0) {
 		log_warnx("unhandled arm64 system register: esr=0x%llx "
 		    "pc=0x%llx", esr, vrs->vrs_pc);
