@@ -52,6 +52,7 @@
 
 #define HPFAR_FIPA_MASK		0xfffffffff0UL
 #define VTTBR_VMID_SHIFT	48
+#define VMPIDR_RES1		(1UL << 31)
 #define VMM_S2_PAGE_SIZE	(4 * PAGE_SIZE)
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
@@ -499,6 +500,15 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;
 	run->avr_cntvoff_el2 = 0;
+	/*
+	 * MPIDR_EL1 must agree with the affinity encoded in the guest's CPU
+	 * description.  The initial uniprocessor ABI assigns Aff0 == 0; retaining
+	 * the RES1 bit gives the guest the architecturally valid MPIDR value
+	 * 0x80000000.  Using vc_id for Aff0 also makes this state ready for the
+	 * first small-SMP extension without exposing whichever physical host CPU
+	 * happened to execute this vCPU.
+	 */
+	run->avr_vmpidr_el2 = VMPIDR_RES1 | vcpu->vc_id;
 	/*
 	 * Keep the physical counter readable, but trap EL1 programming of the
 	 * physical timer.  Unlike trapping the virtual timer, this mechanism is

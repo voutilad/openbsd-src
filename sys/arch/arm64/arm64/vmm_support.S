@@ -106,6 +106,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, cnthctl_el2
 	str	x0, [x17, #AVR_HOST_CNTHCTL_EL2]
+	mrs	x0, vmpidr_el2
+	str	x0, [x17, #AVR_HOST_VMPIDR_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 	/* ICH_HCR_EL2 is per-CPU EL2 state, not part of the guest EL1 bank. */
@@ -185,6 +187,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	cntvoff_el2, x0
 	ldr	x0, [x17, #AVR_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
+	ldr	x0, [x17, #AVR_VMPIDR_EL2]
+	msr	vmpidr_el2, x0
 	ldr	x0, [x17, #AVR_SP]
 	msr	sp_el1, x0
 	ldr	x0, [x17, #AVR_PC]
@@ -301,6 +305,8 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, cnthctl_el2
 	str	x0, [x17, #AVR_HOST_CNTHCTL_EL2]
+	mrs	x0, vmpidr_el2
+	str	x0, [x17, #AVR_HOST_VMPIDR_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
 	/* Preserve the outer host's virtual-interface policy across nesting. */
@@ -367,6 +373,8 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	cntvoff_el2, x0
 	ldr	x0, [x17, #AVR_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
+	ldr	x0, [x17, #AVR_VMPIDR_EL2]
+	msr	vmpidr_el2, x0
 
 	ldr	x0, [x17, #AVR_SP]
 	msr	sp_el1, x0
@@ -605,6 +613,8 @@ END(vmm_hyp_serror)
 	msr	cntvoff_el2, x0
 	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
+	ldr	x0, [x18, #AVR_HOST_VMPIDR_EL2]
+	msr	vmpidr_el2, x0
 	ldr	x0, [x18, #AVR_HOST_SCTLR_EL1]
 	msr	sctlr_el1, x0
 	isb
@@ -652,6 +662,8 @@ END(vmm_hyp_serror)
 	msr	cntvoff_el2, x0
 	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
+	ldr	x0, [x18, #AVR_HOST_VMPIDR_EL2]
+	msr	vmpidr_el2, x0
 	/* ERET lands on .Lvhe_return with the original DAIF and NZCV restored. */
 	ldr	x0, [x18, #AVR_HOST_PC]
 	msr	elr_el2, x0
