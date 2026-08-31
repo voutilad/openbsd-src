@@ -23,6 +23,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zlib.h>
@@ -38,12 +39,23 @@
 #define ISS_DATA_SAS_SHIFT	22
 #define ISS_DATA_SRT_SHIFT	16
 
+/*
+ * OpenBSD arm64 kernels are linked in the upper 128GB of the address space.
+ * The native boot loader strips that virtual base and places the resulting
+ * offsets in a 2MB-aligned, contiguous 64MB physical allocation.
+ */
+#define ARM64_KERNEL_VA_MASK	0x0000007fffffffffULL
+#define ARM64_KERNEL_VA_BASE	0xffffff8000000000ULL
+#define ARM64_KERNEL_ALIGN	(2UL * 1024 * 1024)
+#define ARM64_KERNEL_WINDOW	(64UL * 1024 * 1024)
+
 extern struct vmd	*env;
 extern struct vmd_vm	*current_vm;
 extern int		 con_fd;
 
 static int	arm64_mmio_access(paddr_t, size_t, int, uint64_t *);
 static int	arm64_write_regs(struct vm_run_params *);
+static int	elf_to_gpa(uint64_t, int, uint64_t *);
 static int	load_payload_elf(gzFile, struct vmd_vm *,
 		    struct vcpu_reg_state *);
 static int	vcpu_exit_mmio(struct vm_run_params *);
@@ -102,12 +114,36 @@ load_firmware(struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	return (ret);
 }
 
+static int
+elf_to_gpa(uint64_t addr, int kernel, uint64_t *gpa)
+{
+	uint64_t offset;
+
+	if (!kernel) {
+		*gpa = addr;
+		return (0);
+	}
+	if ((addr & ~ARM64_KERNEL_VA_MASK) != ARM64_KERNEL_VA_BASE)
+		return (-1);
+	offset = addr & ARM64_KERNEL_VA_MASK;
+	if (offset >= ARM64_KERNEL_WINDOW ||
+	    ARM64_RAM_BASE > UINT64_MAX - offset)
+		return (-1);
+	*gpa = ARM64_RAM_BASE + offset;
+	return (0);
+}
+
 /*
- * Load the small, fixed-address ELF images used to exercise this initial
- * backend.  This is intentionally not an OpenBSD kernel loader: every
- * PT_LOAD segment must already name an address in guest RAM, and no
- * relocation, boot arguments, or symbols are provided.  A small FDT does
- * describe the fixed platform and is passed in x2 using OpenBSD's arm64 ABI.
+ * Load either a small fixed-address payload or an OpenBSD arm64 kernel.  A
+ * kernel's ELF addresses are virtual addresses rooted at KERNBASE; matching
+ * bootaa64, strip that base and load the offsets into a 2MB-aligned 64MB
+ * physical window.  OpenBSD's locore discovers this VA-to-PA delta before it
+ * enables its own stage-1 mappings.
+ *
+ * Symbols are not copied yet, so x0 names the end of the loaded PT_LOAD
+ * image.  That is sufficient for early pmap bootstrap and leaves DDB symbol
+ * loading as an independent extension.  x2 points at the FDT for both image
+ * styles, which keeps the fixed-address regression payload useful.
  */
 static int
 load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
@@ -116,9 +152,9 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	Elf64_Phdr ph;
 	struct vm_mem_range *ram;
 	void *mem;
-	uint64_t end, fdt_gpa, ram_end, stack;
+	uint64_t end, entry, fdt_gpa, image_end = 0, load_gpa, ram_end, stack;
 	size_t fdt_size;
-	int entry_ok = 0, loaded = 0, nread;
+	int entry_ok = 0, kernel, loaded = 0, nread;
 	unsigned int i;
 
 	/* The loader may only write the RAM range created above. */
@@ -132,7 +168,7 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	fdt_gpa = ram_end - ARM64_FDT_SIZE;
 	if (gzrewind(fp) == -1 || gzread(fp, &eh, sizeof(eh)) != sizeof(eh))
 		goto bad;
-	/* Reject anything except a native, fixed-address AArch64 executable. */
+	/* Reject anything except a native AArch64 executable. */
 	if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
 	    eh.e_ident[EI_CLASS] != ELFCLASS64 ||
 	    eh.e_ident[EI_DATA] != ELFDATA2LSB ||
@@ -142,6 +178,13 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	    eh.e_phentsize != sizeof(ph) || eh.e_phnum == 0 ||
 	    eh.e_phnum > 64)
 		goto bad;
+	kernel = (eh.e_entry & ~ARM64_KERNEL_VA_MASK) ==
+	    ARM64_KERNEL_VA_BASE;
+	if (kernel && ((ARM64_RAM_BASE & (ARM64_KERNEL_ALIGN - 1)) != 0 ||
+	    ram->vmr_size < ARM64_KERNEL_WINDOW))
+		goto bad;
+	if (elf_to_gpa(eh.e_entry, kernel, &entry) == -1)
+		goto bad;
 
 	for (i = 0; i < eh.e_phnum; i++) {
 		/* Re-seek because loading one segment moves the gzip stream. */
@@ -149,20 +192,37 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		    gzseek(fp, eh.e_phoff + i * sizeof(ph), SEEK_SET) == -1 ||
 		    gzread(fp, &ph, sizeof(ph)) != sizeof(ph))
 			goto bad;
+		if (ph.p_type == PT_OPENBSD_RANDOMIZE) {
+			if (ph.p_filesz > SIZE_MAX ||
+			    elf_to_gpa(ph.p_paddr, kernel, &load_gpa) == -1 ||
+			    load_gpa > UINT64_MAX - ph.p_filesz ||
+			    load_gpa + ph.p_filesz > fdt_gpa)
+				goto bad;
+			mem = hvaddr_mem(load_gpa, ph.p_filesz);
+			if (mem == NULL)
+				goto bad;
+			arc4random_buf(mem, ph.p_filesz);
+			continue;
+		}
 		if (ph.p_type != PT_LOAD || ph.p_memsz == 0)
 			continue;
 		/*
-		 * p_paddr is the guest IPA.  hvaddr_mem() rejects a segment that
-		 * crosses a range boundary, lands in MMIO, or lies outside RAM.
+		 * Fixed payloads use p_paddr as the IPA.  Kernel p_paddr values are
+		 * translated to offsets in the physical load window first.
+		 * hvaddr_mem() then rejects crossings into MMIO or outside RAM.
 		 */
 		if (ph.p_filesz > ph.p_memsz || ph.p_filesz > INT_MAX ||
-		    ph.p_memsz > SIZE_MAX || ph.p_paddr > UINT64_MAX - ph.p_memsz)
+		    ph.p_memsz > SIZE_MAX ||
+		    elf_to_gpa(ph.p_paddr, kernel, &load_gpa) == -1 ||
+		    load_gpa > UINT64_MAX - ph.p_memsz)
 			goto bad;
-		end = ph.p_paddr + ph.p_memsz;
+		end = load_gpa + ph.p_memsz;
+		if (kernel && end > ARM64_RAM_BASE + ARM64_KERNEL_WINDOW)
+			goto bad;
 		/* The top stage-2 page belongs to the firmware table, not ELF. */
 		if (end > fdt_gpa)
 			goto bad;
-		mem = hvaddr_mem(ph.p_paddr, ph.p_memsz);
+		mem = hvaddr_mem(load_gpa, ph.p_memsz);
 		if (mem == NULL)
 			goto bad;
 		/* Zero the whole segment first so p_memsz - p_filesz is BSS. */
@@ -176,13 +236,15 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		}
 		/* Newly copied AArch64 instructions must be visible to the I-cache. */
 		__builtin___clear_cache(mem, (char *)mem + ph.p_memsz);
-		if ((ph.p_flags & PF_X) != 0 && eh.e_entry >= ph.p_paddr &&
-		    eh.e_entry < end)
+		if ((ph.p_flags & PF_X) != 0 && entry >= load_gpa &&
+		    entry < end)
 			entry_ok = 1;
+		if (end > image_end)
+			image_end = end;
 		loaded = 1;
 	}
 	/* Require an aligned entry point inside an executable load segment. */
-	if (!loaded || !entry_ok || eh.e_entry % sizeof(uint32_t) != 0)
+	if (!loaded || !entry_ok || entry % sizeof(uint32_t) != 0)
 		goto bad;
 	mem = hvaddr_mem(fdt_gpa, ARM64_FDT_SIZE);
 	if (mem == NULL || arm64_fdt_build(mem, ARM64_FDT_SIZE,
@@ -194,17 +256,22 @@ load_payload_elf(gzFile fp, struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 	 * guest installs exception vectors and configures the GIC.  SCTLR_RES1 is
 	 * the architecturally valid disabled-MMU value used by vmm(4)'s reset
 	 * path.  x2 contains the guest-physical FDT address expected by the
-	 * OpenBSD arm64 kernel ABI; all other general registers are zero.
+	 * OpenBSD arm64 kernel ABI.  x0 is the physical image end used to set
+	 * esym and delimit early kernel allocations; x1 is reserved and remains
+	 * zero.  Fixed-address diagnostic payloads simply ignore x0.
 	 */
 	stack = fdt_gpa;
 	memset(vrs, 0, sizeof(*vrs));
-	vrs->vrs_pc = eh.e_entry;
+	vrs->vrs_pc = entry;
 	vrs->vrs_sp = (stack - 16) & ~0xfUL;
+	vrs->vrs_gprs[0] = image_end;
 	vrs->vrs_gprs[2] = fdt_gpa;
 	vrs->vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D | PSR_M_EL1h;
 	vrs->vrs_sctlr_el1 = SCTLR_RES1;
-	log_debug("%s: entry 0x%llx, stack 0x%llx, FDT 0x%llx (%zu bytes)",
-	    __func__, vrs->vrs_pc, vrs->vrs_sp, fdt_gpa, fdt_size);
+	log_debug("%s: %s entry 0x%llx, end 0x%llx, stack 0x%llx, "
+	    "FDT 0x%llx (%zu bytes)", __func__,
+	    kernel ? "kernel" : "payload", vrs->vrs_pc, image_end,
+	    vrs->vrs_sp, fdt_gpa, fdt_size);
 	return (0);
 
 bad:
