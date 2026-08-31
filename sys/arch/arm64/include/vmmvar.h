@@ -221,6 +221,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_vttbr_el2;
 	uint64_t	avr_vtcr_el2;
 	uint64_t	avr_hcr_el2;
+	/* Traps guest ICC_*_EL1 accesses without enabling an in-kernel VGIC. */
 	uint64_t	avr_ich_hcr_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
@@ -250,6 +251,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_tpidr_el1;
 	uint64_t	avr_host_cntvoff_el2;
 	uint64_t	avr_host_hcr_el2;
+	/* ICH_HCR_EL2 belongs to the host CPU and must survive each run. */
 	uint64_t	avr_host_ich_hcr_el2;
 };
 

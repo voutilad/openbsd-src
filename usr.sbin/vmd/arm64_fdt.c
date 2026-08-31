@@ -275,6 +275,7 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_end_node(&w) == -1 || fdt_end_node(&w) == -1)
 		goto nospc;
 
+	/* Phandle 1 is also the root's default interrupt-parent above. */
 	if (fdt_begin_node(&w, "intc@8000000") == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(compatible), "arm,gic-v3") == -1 ||
 	    fdt_prop_u32(&w, FDT_NAMEOFF(interrupt_cells), 3) == -1 ||

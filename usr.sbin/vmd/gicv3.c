@@ -29,6 +29,30 @@
 #include "arm64_vm.h"
 #include "gicv3.h"
 
+/*
+ * Initial GICv3 model
+ * -------------------
+ *
+ * The guest sees the standard split GICv3 programming interface:
+ *
+ *  - GICD_* MMIO registers hold global SPI policy and state.
+ *  - GICR_* MMIO registers hold the one vCPU's SGI/PPI state.
+ *  - ICC_*_EL1 system registers select, acknowledge, and complete IRQs.
+ *
+ * vmm(4) does not know any of this state.  It supplies a single virtual IRQ
+ * input through HCR_EL2.VI and returns trapped ICC accesses to vmd.  The
+ * gicv3_candidate_locked() predicate below collapses the userland GIC state
+ * into that one input.  Reading IAR moves one INTID from pending to active;
+ * writing EOIR moves it from active to inactive.  Recomputing after each
+ * state change raises or lowers VI through VMM_IOC_INTR.
+ *
+ * This first increment intentionally describes one Redistributor, one vCPU,
+ * and 64 INTIDs (32 private plus 32 SPIs).  It implements no ITS, LPIs,
+ * security-state separation, or binary-point priority grouping.  State is
+ * nevertheless kept in per-INTID arrays so SMP can extend the model without
+ * replacing the guest-visible GICv3 ABI.
+ */
+
 /* Distributor registers. */
 #define GICD_CTLR		0x0000
 #define  GICD_CTLR_ENABLE_G1	((1U << 0) | (1U << 1))
@@ -80,18 +104,24 @@
 #define GICV3_CTLR_PRIBITS	(3U << 8)
 
 struct gicv3_dev {
+	/* MMIO, ICC exits, and IRQ callbacks can run on different threads. */
 	pthread_mutex_t	 gd_mtx;
 	uint32_t	 gd_vm_id;
+
+	/* Distributor and per-INTID architectural state. */
 	uint32_t	 gd_ctlr;
 	uint32_t	 gd_group[GICV3_NREG32];
 	uint32_t	 gd_enabled[GICV3_NREG32];
 	uint32_t	 gd_pending[GICV3_NREG32];
 	uint32_t	 gd_active[GICV3_NREG32];
+	/* Raw device levels are separate from the latched pending state. */
 	uint32_t	 gd_level[GICV3_NREG32];
 	uint32_t	 gd_config[GICV3_NCONFIG];
 	uint8_t		 gd_priority[GICV3_NINTIDS];
 	uint64_t	 gd_route[GICV3_NINTIDS];
 	uint32_t	 gd_waker;
+
+	/* The one vCPU's system-register interface and driven VI level. */
 	uint8_t		 gd_pmr;
 	uint8_t		 gd_bpr1;
 	uint8_t		 gd_igrpen1;
@@ -129,6 +159,7 @@ gicv3_init(uint32_t vm_id)
 {
 	mutex_lock(&gicv3.gd_mtx);
 	gicv3.gd_vm_id = vm_id;
+	/* DS advertises the deliberately simple single-security-state model. */
 	gicv3.gd_ctlr = GICD_CTLR_DS;
 	memset(gicv3.gd_group, 0, sizeof(gicv3.gd_group));
 	memset(gicv3.gd_enabled, 0, sizeof(gicv3.gd_enabled));
@@ -139,6 +170,7 @@ gicv3_init(uint32_t vm_id)
 	memset(gicv3.gd_priority, 0xff, sizeof(gicv3.gd_priority));
 	memset(gicv3.gd_route, 0, sizeof(gicv3.gd_route));
 	gicv3.gd_waker = 0;
+	/* PMR zero and IGRPEN1 zero mask every IRQ until guest initialization. */
 	gicv3.gd_pmr = 0;
 	gicv3.gd_bpr1 = 0;
 	gicv3.gd_igrpen1 = 0;
@@ -146,7 +178,11 @@ gicv3_init(uint32_t vm_id)
 	mutex_unlock(&gicv3.gd_mtx);
 }
 
-/* Return the numerically highest-priority active interrupt. */
+/*
+ * Return the numerically highest-priority active interrupt.  GIC priorities
+ * are inverted: a smaller byte denotes a more urgent interrupt.  This value
+ * acts as the running-priority ceiling for preemption by another INTID.
+ */
 static uint8_t
 gicv3_running_priority_locked(void)
 {
@@ -176,6 +212,7 @@ gicv3_candidate_locked(void)
 	uint32_t bit;
 	int best = GICV3_SPURIOUS, intid, word;
 
+	/* Both the Distributor and CPU interface must permit Group-1 delivery. */
 	if ((gicv3.gd_ctlr & GICD_CTLR_ENABLE_G1) == 0 ||
 	    gicv3.gd_igrpen1 == 0)
 		return (GICV3_SPURIOUS);
@@ -183,6 +220,7 @@ gicv3_candidate_locked(void)
 	for (intid = 0; intid < GICV3_NINTIDS; intid++) {
 		word = gicv3_word(intid);
 		bit = gicv3_bit(intid);
+		/* PMR and running priority use strict, inverted comparisons. */
 		if ((gicv3.gd_group[word] & bit) == 0 ||
 		    (gicv3.gd_enabled[word] & bit) == 0 ||
 		    (gicv3.gd_pending[word] & bit) == 0 ||
@@ -190,6 +228,7 @@ gicv3_candidate_locked(void)
 		    gicv3.gd_priority[intid] >= gicv3.gd_pmr ||
 		    gicv3.gd_priority[intid] >= running_priority)
 			continue;
+		/* Affinity zero names the sole Redistributor/vCPU. */
 		if (intid >= GICV3_SPI_BASE && gicv3.gd_route[intid] != 0)
 			continue;
 		if (best == GICV3_SPURIOUS ||
@@ -210,12 +249,13 @@ gicv3_drive_locked(void)
 	asserted = gicv3_candidate_locked() != GICV3_SPURIOUS;
 	if (asserted == gicv3.gd_irq_line)
 		return (0);
+	/* vip_intr is a level, not an INTID; identity remains entirely above. */
 	error = vcpu_intr(gicv3.gd_vm_id, 0, asserted);
 	if (error != 0)
 		return (error);
 	gicv3.gd_irq_line = asserted;
 	if (asserted) {
-		/* An asynchronous device may have pended the IRQ while WFI slept. */
+		/* An asynchronous device may pend the IRQ while WFI sleeps. */
 		vcpu_unhalt(0);
 		vcpu_signal_run(0);
 	}
@@ -244,10 +284,12 @@ gicv3_set_irq(uint32_t vm_id, uint32_t vcpu_id, int intid, int asserted)
 	bit = gicv3_bit(intid);
 	mutex_lock(&gicv3.gd_mtx);
 	if (asserted) {
+		/* An asserted input makes an inactive interrupt pending. */
 		gicv3.gd_level[word] |= bit;
 		gicv3.gd_pending[word] |= bit;
 	} else {
 		gicv3.gd_level[word] &= ~bit;
+		/* Edge pending is latched; an unacknowledged level may disappear. */
 		if (!gicv3_is_edge_locked(intid) &&
 		    (gicv3.gd_active[word] & bit) == 0)
 			gicv3.gd_pending[word] &= ~bit;
@@ -265,6 +307,7 @@ gicv3_priority_locked(paddr_t offset, int first, size_t len, int write,
 	uint64_t value = 0;
 	size_t i;
 
+	/* GIC priority fields are bytes, often accessed four at a time. */
 	if (len != 1 && len != 4)
 		return (EOPNOTSUPP);
 	if (offset > GICV3_NINTIDS || len > GICV3_NINTIDS - offset)
@@ -307,6 +350,7 @@ gicv3_dist_locked(paddr_t offset, size_t len, int write, uint64_t *data)
 	value = *data;
 	switch (offset) {
 	case GICD_CTLR:
+		/* RWP is clear because userland completes each write immediately. */
 		if (write)
 			gicv3.gd_ctlr = GICD_CTLR_DS | (value &
 			    (GICD_CTLR_ENABLE_G1 | GICD_CTLR_ARE_NS));
@@ -341,6 +385,7 @@ gicv3_dist_locked(paddr_t offset, size_t len, int write, uint64_t *data)
 		return (0); \
 	} \
 } while (0)
+	/* IS* registers are write-one-set; IC* registers are write-one-clear. */
 	GICD_REG32(GICD_IGROUPR, gd_group,
 	    gicv3.gd_group[index] = value);
 	GICD_REG32(GICD_ISENABLER, gd_enabled,
@@ -404,6 +449,7 @@ gicv3_redist_locked(paddr_t offset, size_t len, int write, uint64_t *data)
 		break;
 	case GICR_WAKER:
 		if (write) {
+			/* Wake/sleep completes synchronously, so ChildrenAsleep follows. */
 			gicv3.gd_waker = value & GICR_WAKER_PROCESSOR_SLEEP;
 			if (gicv3.gd_waker != 0)
 				gicv3.gd_waker |= GICR_WAKER_CHILDREN_ASLEEP;
@@ -490,6 +536,7 @@ gicv3_mmio(paddr_t gpa, size_t len, int write, uint64_t *data)
 		    write, data);
 	else
 		error = EFAULT;
+	/* Enables, masks, priorities, and pending bits can all change VI. */
 	if (error == 0 && write)
 		error = gicv3_drive_locked();
 	mutex_unlock(&gicv3.gd_mtx);
@@ -499,6 +546,7 @@ gicv3_mmio(paddr_t gpa, size_t len, int write, uint64_t *data)
 static int
 gicv3_sysreg_is(uint64_t esr, int op0, int op1, int crn, int crm, int op2)
 {
+	/* EXCP_MSR copies the instruction's encoded system-register tuple here. */
 	return (ISS_MSR_OP0(esr) == op0 && ISS_MSR_OP1(esr) == op1 &&
 	    ISS_MSR_CRn(esr) == crn && ISS_MSR_CRm(esr) == crm &&
 	    ISS_MSR_OP2(esr) == op2);
@@ -556,6 +604,7 @@ gicv3_icc(uint64_t esr, int write, uint64_t *data)
 			intid = gicv3_candidate_locked();
 			*data = intid;
 			if (intid != GICV3_SPURIOUS) {
+				/* Acknowledge consumes pending and establishes priority. */
 				word = gicv3_word(intid);
 				bit = gicv3_bit(intid);
 				gicv3.gd_pending[word] &= ~bit;
@@ -572,6 +621,7 @@ gicv3_icc(uint64_t esr, int write, uint64_t *data)
 				word = gicv3_word(intid);
 				bit = gicv3_bit(intid);
 				gicv3.gd_active[word] &= ~bit;
+				/* An asserted level becomes pending again after EOI. */
 				if ((gicv3.gd_level[word] & bit) != 0)
 					gicv3.gd_pending[word] |= bit;
 			}

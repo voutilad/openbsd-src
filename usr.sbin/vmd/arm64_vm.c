@@ -510,6 +510,13 @@ vcpu_exit_sysreg(struct vm_run_params *vrp)
 	u_int reg;
 	int error, read;
 
+	/*
+	 * EXCP_MSR's ISS names the op fields and Rt without decoding guest
+	 * memory.  DIR distinguishes MRS (read) from MSR (write).  vmm(4)
+	 * leaves PC on the trapped instruction, so completion consists of
+	 * supplying/consuming Rt, advancing four bytes, and writing the whole
+	 * architectural snapshot back before the next VMM_IOC_RUN.
+	 */
 	if ((esr & ESR_ELx_IL) == 0)
 		return (EFAULT);
 	reg = ISS_MSR_Rt(esr);

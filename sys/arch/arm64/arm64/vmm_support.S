@@ -104,6 +104,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
+	/* ICH_HCR_EL2 is per-CPU EL2 state, not part of the guest EL1 bank. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
 
@@ -115,6 +116,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+	/* Install ICC trap policy before HCR_EL2.IMO exposes the virtual view. */
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 
@@ -289,6 +291,7 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
+	/* Preserve the outer host's virtual-interface policy across nesting. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
 
@@ -297,6 +300,7 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+	/* The following HCR write redirects guest ICC accesses to this policy. */
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
@@ -538,6 +542,7 @@ END(vmm_hyp_serror)
 	 * regime.  No exit-side TLBI is needed: a later mapping change marks
 	 * AVR_FLUSH_TLB, and otherwise the same VMID/context remains valid.
 	 */
+	/* Stop trapping ICC accesses before returning to the nVHE host. */
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
@@ -597,6 +602,7 @@ END(vmm_hyp_serror)
 	 * stayed live throughout the guest run.  The guest used EL12, so only
 	 * genuinely shared EL0/EL1 registers need explicit restoration here.
 	 */
+	/* Restore the VHE host's ICH policy just as its HCR policy is restored. */
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
