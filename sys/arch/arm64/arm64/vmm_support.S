@@ -20,6 +20,7 @@
 #include <machine/armreg.h>
 
 	.arch armv8.1-a
+	.arch_extension fp
 
 #define VMM_HVC_ENTER	0x4f42
 
@@ -202,6 +203,29 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	spsr_el2, x0
 	dsb	ish
 	isb
+
+	/* The vector file is not banked by exception level. */
+	add	x16, x17, #AVR_FP
+	ldp	q0, q1, [x16], #32
+	ldp	q2, q3, [x16], #32
+	ldp	q4, q5, [x16], #32
+	ldp	q6, q7, [x16], #32
+	ldp	q8, q9, [x16], #32
+	ldp	q10, q11, [x16], #32
+	ldp	q12, q13, [x16], #32
+	ldp	q14, q15, [x16], #32
+	ldp	q16, q17, [x16], #32
+	ldp	q18, q19, [x16], #32
+	ldp	q20, q21, [x16], #32
+	ldp	q22, q23, [x16], #32
+	ldp	q24, q25, [x16], #32
+	ldp	q26, q27, [x16], #32
+	ldp	q28, q29, [x16], #32
+	ldp	q30, q31, [x16]
+	ldr	x0, [x17, #AVR_FPCR]
+	msr	fpcr, x0
+	ldr	x0, [x17, #AVR_FPSR]
+	msr	fpsr, x0
 
 	/* x17 is the run-page pointer, so restore the guest's x17 last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
@@ -395,6 +419,29 @@ ENTRY_NP(vmm_hyp_sync)
 	dsb	ish
 	isb
 
+	/* FP/AdvSIMD registers are shared between the host and guest. */
+	add	x16, x17, #AVR_FP
+	ldp	q0, q1, [x16], #32
+	ldp	q2, q3, [x16], #32
+	ldp	q4, q5, [x16], #32
+	ldp	q6, q7, [x16], #32
+	ldp	q8, q9, [x16], #32
+	ldp	q10, q11, [x16], #32
+	ldp	q12, q13, [x16], #32
+	ldp	q14, q15, [x16], #32
+	ldp	q16, q17, [x16], #32
+	ldp	q18, q19, [x16], #32
+	ldp	q20, q21, [x16], #32
+	ldp	q22, q23, [x16], #32
+	ldp	q24, q25, [x16], #32
+	ldp	q26, q27, [x16], #32
+	ldp	q28, q29, [x16], #32
+	ldp	q30, q31, [x16]
+	ldr	x0, [x17, #AVR_FPCR]
+	msr	fpcr, x0
+	ldr	x0, [x17, #AVR_FPSR]
+	msr	fpsr, x0
+
 	/* x17 carries the run page until the guest's x17 is loaded last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
 	ldp	x2, x3, [x17, #AVR_GPRS + 16]
@@ -478,6 +525,33 @@ END(vmm_hyp_serror)
 	stp	x29, x30, [x18, #AVR_GPRS + 232]
 	mrs	x0, cntvoff_el2
 	str	x0, [x18, #AVR_GPRS + 144]
+
+	/*
+	 * FP/AdvSIMD has no EL1/EL2 bank.  Capture it before restoring any host
+	 * control state; the C wrapper arranged for the host process's previous
+	 * vector state to be held in its PCB rather than in these registers.
+	 */
+	add	x16, x18, #AVR_FP
+	stp	q0, q1, [x16], #32
+	stp	q2, q3, [x16], #32
+	stp	q4, q5, [x16], #32
+	stp	q6, q7, [x16], #32
+	stp	q8, q9, [x16], #32
+	stp	q10, q11, [x16], #32
+	stp	q12, q13, [x16], #32
+	stp	q14, q15, [x16], #32
+	stp	q16, q17, [x16], #32
+	stp	q18, q19, [x16], #32
+	stp	q20, q21, [x16], #32
+	stp	q22, q23, [x16], #32
+	stp	q24, q25, [x16], #32
+	stp	q26, q27, [x16], #32
+	stp	q28, q29, [x16], #32
+	stp	q30, q31, [x16]
+	mrs	x0, fpcr
+	str	x0, [x18, #AVR_FPCR]
+	mrs	x0, fpsr
+	str	x0, [x18, #AVR_FPSR]
 
 	/* Save state shared by both VHE and nVHE guest execution. */
 	mrs	x0, sp_el1

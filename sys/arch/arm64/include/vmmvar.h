@@ -214,6 +214,16 @@ struct arm64_vmm_run {
 	uint64_t	avr_tpidrro_el0;
 	uint64_t	avr_tpidr_el1;
 
+	/*
+	 * FP/AdvSIMD is private kernel state for now: the initial vmm(4) ABI
+	 * exposes only integer registers, but a guest must retain all 32 128-bit
+	 * vector registers across exits.  Keep the first register 16-byte aligned
+	 * so the EL2 pair loads and stores are naturally aligned.
+	 */
+	uint64_t	avr_fp[64] __aligned(16);
+	uint64_t	avr_fpcr;
+	uint64_t	avr_fpsr;
+
 	/* Syndrome state captured by the EL2 vectors on a guest exit. */
 	uint64_t	avr_esr_el2;
 	uint64_t	avr_far_el2;

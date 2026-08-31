@@ -29,6 +29,7 @@
 
 #include <machine/armreg.h>
 #include <machine/cpu.h>
+#include <machine/fpu.h>
 #include <machine/hypervisor.h>
 #include <machine/intr.h>
 #include <machine/pmap.h>
@@ -69,6 +70,8 @@ static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static void	arm64_vmm_load_run(struct vcpu *);
 static void	arm64_vmm_save_run(struct vcpu *);
+
+CTASSERT(sizeof(struct arm64_vmm_run) <= PAGE_SIZE);
 
 int
 vmm_enabled(void)
@@ -301,6 +304,8 @@ vcpu_deinit(struct vcpu *vcpu)
 int
 vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 {
+	struct arm64_vmm_run *run;
+
 	if ((vrs->vrs_pc & (INSN_SIZE - 1)) != 0)
 		return (EINVAL);
 	if ((vrs->vrs_pstate & PSR_M_MASK) != PSR_M_EL1h)
@@ -309,6 +314,11 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	memcpy(&vcpu->vc_regs, vrs, sizeof(vcpu->vc_regs));
 	if (vcpu->vc_regs.vrs_sctlr_el1 == 0)
 		vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
+	/* RESETCPU starts a fresh architectural context, including FP/AdvSIMD. */
+	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	memset(run->avr_fp, 0, sizeof(run->avr_fp));
+	run->avr_fpcr = 0;
+	run->avr_fpsr = 0;
 	return (0);
 }
 
@@ -608,10 +618,19 @@ vm_run(struct vm_run_params *vrp)
 		/* Materialize the saved vCPU state in the EL2 run page. */
 		arm64_vmm_load_run(vcpu);
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
+		/*
+		 * A guest may use FP/AdvSIMD whenever its CPACR_EL1 permits it.
+		 * Save any live user state through the normal lazy-FPU machinery and
+		 * make the vector unit available to the EL2 context switch.  On return,
+		 * fpu_kernel_exit() leaves user access trapping so the process reloads
+		 * its saved state instead of observing the guest's vector registers.
+		 */
+		fpu_kernel_enter();
 		if (arm64_has_el2 == 2)
 			arm64_vmm_enter_vhe(vcpu->vc_control_va);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
+		fpu_kernel_exit();
 		/*
 		 * EL2 has executed the requested TLBI even if a pending host IRQ
 		 * prevented the guest from retiring an instruction.  Do not repeat

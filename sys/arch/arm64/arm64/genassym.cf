@@ -111,6 +111,9 @@ member	avr_cntkctl_el1
 member	avr_tpidr_el0
 member	avr_tpidrro_el0
 member	avr_tpidr_el1
+member	avr_fp
+member	avr_fpcr
+member	avr_fpsr
 member	avr_esr_el2
 member	avr_far_el2
 member	avr_hpfar_el2
