@@ -470,6 +470,15 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
 	/*
+	 * HCR_EL2.IMO makes Non-secure EL1 Group 1 ICC accesses select the
+	 * virtual CPU interface.  TALL1 returns those accesses to userland;
+	 * TC does the same for the common CPU-interface registers, including
+	 * ICC_PMR_EL1 and ICC_CTLR_EL1.  vmm(4) deliberately keeps no GIC
+	 * state: the VM_EXIT_EXCEPTION syndrome identifies the register and
+	 * VMM_IOC_WRITEREGS completes the instruction.
+	 */
+	run->avr_ich_hcr_el2 = ICH_HCR_TALL1 | ICH_HCR_TC;
+	/*
 	 * VI presents the CPU's virtual IRQ input.  The CPU takes the exception
 	 * only when PSTATE.I permits it, and masks IRQs as part of exception
 	 * entry.  VI stays level-triggered until userland lowers it with a zero

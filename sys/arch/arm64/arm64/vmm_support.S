@@ -104,6 +104,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
+	mrs	x0, ICH_HCR_EL2
+	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
 
 	/* All lower-EL AArch64 exceptions now enter the vmm vector slots. */
 	adrp	x0, hyp_vectors
@@ -113,6 +115,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
+	msr	ICH_HCR_EL2, x0
 
 	/*
 	 * Clear TGE but retain E2H.  With E2H=1,TGE=0, EL12 names the
@@ -285,12 +289,16 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, hcr_el2
 	str	x0, [x17, #AVR_HOST_HCR_EL2]
+	mrs	x0, ICH_HCR_EL2
+	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
 
 	/* Install the guest's stage-2 root, VMID, and address-space controls. */
 	ldr	x0, [x17, #AVR_VTTBR_EL2]
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
+	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lnvhe_tlb_done
 	/* See the VHE path above: C requests this only after mapping changes. */
@@ -530,6 +538,8 @@ END(vmm_hyp_serror)
 	 * regime.  No exit-side TLBI is needed: a later mapping change marks
 	 * AVR_FLUSH_TLB, and otherwise the same VMID/context remains valid.
 	 */
+	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
+	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
@@ -587,6 +597,8 @@ END(vmm_hyp_serror)
 	 * stayed live throughout the guest run.  The guest used EL12, so only
 	 * genuinely shared EL0/EL1 registers need explicit restoration here.
 	 */
+	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
+	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
 	msr	hcr_el2, x0
 	isb

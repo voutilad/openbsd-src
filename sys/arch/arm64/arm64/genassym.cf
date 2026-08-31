@@ -116,6 +116,7 @@ member	avr_hpfar_el2
 member	avr_vttbr_el2
 member	avr_vtcr_el2
 member	avr_hcr_el2
+member	avr_ich_hcr_el2
 member	avr_mode
 member	avr_exit
 member	avr_flush_tlb
@@ -141,3 +142,4 @@ member	avr_host_tpidrro_el0
 member	avr_host_tpidr_el1
 member	avr_host_cntvoff_el2
 member	avr_host_hcr_el2
+member	avr_host_ich_hcr_el2

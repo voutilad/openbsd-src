@@ -221,6 +221,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_vttbr_el2;
 	uint64_t	avr_vtcr_el2;
 	uint64_t	avr_hcr_el2;
+	uint64_t	avr_ich_hcr_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
 	/* Invalidate this VMID's cached stage-2 translations before entry. */
@@ -249,6 +250,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_tpidr_el1;
 	uint64_t	avr_host_cntvoff_el2;
 	uint64_t	avr_host_hcr_el2;
+	uint64_t	avr_host_ich_hcr_el2;
 };
 
 struct vcpu {
