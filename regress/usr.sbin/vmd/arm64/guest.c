@@ -14,7 +14,8 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *
- * Minimal freestanding arm64 payload for the vmd FDT and PL011 regression.
+ * Minimal freestanding arm64 payload for the vmd FDT, GICv3, and PL011
+ * regression.
  * It intentionally uses no OpenBSD headers or runtime so guest.elf is a
  * fixed-address payload that vmd's first arm64 loader can copy directly.
  */
@@ -45,6 +46,30 @@ typedef unsigned long usize;
 #define PL011_FR_TXFF	(1U << 5)
 #define FALLBACK_UART	0x09000000UL
 
+#define GICD_CTLR	0x0000
+#define  GICD_CTLR_ENABLE_G1	((1U << 0) | (1U << 1))
+#define  GICD_CTLR_ARE_NS	(1U << 4)
+#define GICD_IGROUPR1	0x0084
+#define GICD_ISENABLER1	0x0104
+#define GICD_ICENABLER1	0x0184
+#define GICD_ISPENDR1	0x0204
+#define GICD_ICPENDR1	0x0284
+#define GICD_ICACTIVER1	0x0384
+#define GICD_IPRIORITYR	0x0400
+#define GICD_ICFGR	0x0c00
+#define GICD_IROUTER	0x6000
+#define GICR_WAKER	0x00014
+#define  GICR_WAKER_PROCESSOR_SLEEP (1U << 1)
+
+#define TEST_INTID	33
+#define TEST_INTID_BIT	(1U << (TEST_INTID - 32))
+#define GIC_SPURIOUS	1023
+
+struct gic_bases {
+	u64 dist;
+	u64 redist;
+};
+
 struct fdt_walk {
 	const u8 *blob;
 	const u8 *p;
@@ -65,13 +90,17 @@ struct fdt_item {
 static int	blob_init(struct fdt_walk *, const void *);
 static int	bytes_equal(const u8 *, usize, const char *);
 static u32	get_be32(const void *);
+static int	find_gic(const void *, struct gic_bases *);
 static u64	find_uart(const void *);
 static int	property_has_string(const u8 *, u32, const char *);
 static int	string_equal(const u8 *, const char *);
 static int	walk_next(struct fdt_walk *, struct fdt_item *);
 static void	uart_puts(u64, const char *);
 
+static volatile u32 guest_intid = GIC_SPURIOUS;
+
 void	guest_main(const void *);
+void	guest_irq(void);
 
 static u32
 get_be32(const void *vp)
@@ -287,6 +316,49 @@ find_uart(const void *fdt)
 	return (0);
 }
 
+static int
+find_gic(const void *fdt, struct gic_bases *bases)
+{
+	struct fdt_item item;
+	struct fdt_walk walk;
+	u64 dist = 0, dist_size = 0, redist = 0, redist_size = 0;
+	int compatible = 0, in_gic = 0, rv;
+
+	if (bases == (void *)0 || blob_init(&walk, fdt) == -1)
+		return (-1);
+	while ((rv = walk_next(&walk, &item)) > 0) {
+		if (item.token == FDT_NODE_BEGIN && item.depth == 1) {
+			in_gic = 1;
+			compatible = 0;
+			dist = dist_size = redist = redist_size = 0;
+		} else if (item.token == FDT_PROPERTY && in_gic &&
+		    string_equal(item.name, "compatible")) {
+			compatible = property_has_string(item.data, item.len,
+			    "arm,gic-v3");
+		} else if (item.token == FDT_PROPERTY && in_gic &&
+		    string_equal(item.name, "reg") && item.len >= 32) {
+			dist = (u64)get_be32(item.data) << 32 |
+			    get_be32(item.data + 4);
+			dist_size = (u64)get_be32(item.data + 8) << 32 |
+			    get_be32(item.data + 12);
+			redist = (u64)get_be32(item.data + 16) << 32 |
+			    get_be32(item.data + 20);
+			redist_size = (u64)get_be32(item.data + 24) << 32 |
+			    get_be32(item.data + 28);
+		} else if (item.token == FDT_NODE_END && item.depth == 1) {
+			if (in_gic && compatible && dist != 0 &&
+			    dist_size >= 0x10000 && redist != 0 &&
+			    redist_size >= 0x20000) {
+				bases->dist = dist;
+				bases->redist = redist;
+				return (0);
+			}
+			in_gic = 0;
+		}
+	}
+	return (-1);
+}
+
 static void
 uart_puts(u64 base, const char *s)
 {
@@ -300,14 +372,105 @@ uart_puts(u64 base, const char *s)
 	}
 }
 
+static void
+write_icc_pmr(u64 value)
+{
+	__asm volatile("msr ICC_PMR_EL1, %x0" :: "r"(value) : "memory");
+}
+
+static void
+write_icc_bpr1(u64 value)
+{
+	__asm volatile("msr ICC_BPR1_EL1, %x0" :: "r"(value) : "memory");
+}
+
+static void
+write_icc_igrpen1(u64 value)
+{
+	__asm volatile("msr ICC_IGRPEN1_EL1, %x0" :: "r"(value) : "memory");
+}
+
+static u64
+read_icc_iar1(void)
+{
+	u64 value;
+
+	__asm volatile("mrs %x0, ICC_IAR1_EL1" : "=r"(value) :: "memory");
+	return (value);
+}
+
+static void
+write_icc_eoir1(u64 value)
+{
+	__asm volatile("msr ICC_EOIR1_EL1, %x0" :: "r"(value) : "memory");
+}
+
+void
+guest_irq(void)
+{
+	u64 iar;
+
+	/* IAR returns and activates the selected INTID; EOIR deactivates it. */
+	iar = read_icc_iar1();
+	guest_intid = iar & 0xffffff;
+	write_icc_eoir1(iar);
+}
+
 void
 guest_main(const void *fdt)
 {
+	struct gic_bases gic;
+	volatile u8 *priority;
+	volatile u32 *dist, *redist;
+	volatile u64 *router;
+	u32 config, waker;
 	u64 uart;
 
 	uart = find_uart(fdt);
-	if (uart != 0)
-		uart_puts(uart, "arm64 vmd FDT + polling PL011 works\r\n");
-	else
+	if (uart == 0 || find_gic(fdt, &gic) == -1) {
 		uart_puts(FALLBACK_UART, "arm64 vmd FDT invalid\r\n");
+		return;
+	}
+	dist = (volatile u32 *)gic.dist;
+	redist = (volatile u32 *)gic.redist;
+	priority = (volatile u8 *)(gic.dist + GICD_IPRIORITYR);
+	router = (volatile u64 *)(gic.dist + GICD_IROUTER);
+
+	/* Wake the one Redistributor and clear all old SPI state. */
+	waker = redist[GICR_WAKER / sizeof(u32)];
+	redist[GICR_WAKER / sizeof(u32)] =
+	    waker & ~GICR_WAKER_PROCESSOR_SLEEP;
+	dist[GICD_ICENABLER1 / sizeof(u32)] = 0xffffffff;
+	dist[GICD_ICPENDR1 / sizeof(u32)] = 0xffffffff;
+	dist[GICD_ICACTIVER1 / sizeof(u32)] = 0xffffffff;
+
+	/* Configure SPI 33 as a routed, non-secure Group-1 edge interrupt. */
+	dist[GICD_IGROUPR1 / sizeof(u32)] |= TEST_INTID_BIT;
+	priority[TEST_INTID] = 0x80;
+	config = dist[(GICD_ICFGR + (TEST_INTID / 16) * sizeof(u32)) /
+	    sizeof(u32)];
+	config |= 2U << (2 * (TEST_INTID & 15));
+	dist[(GICD_ICFGR + (TEST_INTID / 16) * sizeof(u32)) /
+	    sizeof(u32)] = config;
+	router[TEST_INTID] = 0;
+	dist[GICD_ISENABLER1 / sizeof(u32)] = TEST_INTID_BIT;
+	dist[GICD_CTLR / sizeof(u32)] |=
+	    GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1;
+
+	/* Open the system-register CPU interface, then unmask IRQ in PSTATE. */
+	write_icc_pmr(0xff);
+	write_icc_bpr1(0);
+	write_icc_igrpen1(1);
+	__asm volatile("dsb sy; isb; msr daifclr, #2" ::: "memory");
+
+	/* A software-pended SPI exercises Distributor -> ICC -> IRQ -> EOI. */
+	guest_intid = GIC_SPURIOUS;
+	dist[GICD_ISPENDR1 / sizeof(u32)] = TEST_INTID_BIT;
+	while (guest_intid == GIC_SPURIOUS)
+		__asm volatile("wfi" ::: "memory");
+
+	if (guest_intid == TEST_INTID)
+		uart_puts(uart, "arm64 vmd FDT + GICv3 SPI interrupt works\r\n");
+	else
+		uart_puts(uart, "arm64 vmd GICv3 returned wrong INTID\r\n");
 }

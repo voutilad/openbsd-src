@@ -1,13 +1,15 @@
-Minimal arm64 FDT/PL011 payload
-===============================
+Minimal arm64 FDT/GICv3/PL011 payload
+=====================================
 
 guest.elf is a freestanding, fixed-address AArch64 executable for manually
 exercising the first vmd arm64 backend.  vmd loads it at 0x40000000, builds a
 minimal FDT in the last 16KB page of guest RAM, and enters the payload with the
-FDT guest-physical address in x2.  The payload reads /chosen/stdout-path,
-resolves the UART node, verifies its arm,pl011 compatibility, decodes reg, and
-uses that address for polling output.  Its success line therefore checks both
-the FDT handoff and MMIO emulation.
+FDT guest-physical address in x2.  The payload resolves the polling PL011 and
+the arm,gic-v3 node from that table, installs an EL1 vector table, configures
+SPI 33, and software-pends it through GICD_ISPENDR.  Its handler acknowledges
+the INTID through ICC_IAR1_EL1 and writes ICC_EOIR1_EL1 before printing the
+success line.  This checks FDT handoff, 8/32/64-bit GIC MMIO, trapped ICC
+system registers, VMM_IOC_INTR delivery, architectural IRQ entry, and EOI.
 
 Build vmd and the payload:
 
@@ -29,7 +31,7 @@ Start and attach to the toy guest from another terminal:
 
 The console should print:
 
-	arm64 vmd FDT + polling PL011 works
+	arm64 vmd FDT + GICv3 SPI interrupt works
 
 The payload then issues HVC and remains parked without consuming a host CPU.
 Detach with the vmctl console escape and stop it when finished:

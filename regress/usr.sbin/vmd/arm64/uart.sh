@@ -72,7 +72,7 @@ tty="$(printf '%s\n' "${startout}" | sed -n 's/^.*tty //p')"
 # The assembly entry has a bounded delay so this reader precedes PL011 output.
 timeout 7 cat "${tty}" >"${console}" 2>&1 || true
 
-grep -q "arm64 vmd FDT + polling PL011 works" "${console}" ||
-	fail "guest did not discover and write to the FDT-described PL011"
+grep -q "arm64 vmd FDT + GICv3 SPI interrupt works" "${console}" ||
+	fail "guest did not take, acknowledge, and EOI the FDT-described GICv3 SPI"
 ${VMCTL} status "${vmname}" | grep -q "${vmname}" ||
 	fail "guest did not remain halted after HVC"

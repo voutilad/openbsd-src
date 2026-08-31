@@ -10,7 +10,7 @@ VMCTL?=		/usr/sbin/vmctl
 
 CLEANFILES+=	guest.o guest_start.o guest.elf console.out vmd.log
 
-REGRESS_TARGETS=	run-regress-fdt-uart
+REGRESS_TARGETS=	run-regress-fdt-gic-uart
 REGRESS_ROOT_TARGETS=	${REGRESS_TARGETS}
 
 guest_start.o: guest.S
@@ -25,7 +25,7 @@ guest.o: guest.c
 guest.elf: guest_start.o guest.o guest.ld
 	${LD} -nopie -T ${.CURDIR}/guest.ld -o $@ guest_start.o guest.o
 
-run-regress-fdt-uart: guest.elf
+run-regress-fdt-gic-uart: guest.elf
 	${SUDO} env VMD=${VMD} VMCTL=${VMCTL} OBJDIR=${.OBJDIR} \
 	    sh ${.CURDIR}/uart.sh
 
