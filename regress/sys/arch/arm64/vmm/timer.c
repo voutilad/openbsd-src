@@ -40,21 +40,21 @@
 
 /*
  * CNTKCTL_EL1 is ordinary guest context and must survive an exit.  EL1's
- * virtual timer control registers, however, are trapped so the device model
+ * physical timer control registers, however, are trapped so the device model
  * in vmd(8) can schedule the interrupt advertised by the guest FDT:
  *
  *     msr CNTKCTL_EL1, x3
  *     mrs x4, CNTKCTL_EL1
- *     mrs x2, CNTV_CTL_EL0
- *     msr CNTV_TVAL_EL0, x5
+ *     mrs x2, CNTP_CTL_EL0
+ *     msr CNTP_TVAL_EL0, x5
  *     mov x0, #GUEST_RESULT
  *     hvc #0
  */
 static const uint32_t guest_code[] = {
 	0xd518e103,
 	0xd538e104,
-	0xd53be322,
-	0xd51be305,
+	0xd53be222,
+	0xd51be205,
 	0xd2800840,
 	0xd4000002,
 };
@@ -96,10 +96,10 @@ check_timer_exit(struct vm_run_params *run, uint64_t pc, u_int op2,
 	if (ESR_ELx_EXCEPTION(esr) != EXCP_MSR ||
 	    (esr & ESR_ELx_IL) == 0 ||
 	    ISS_MSR_OP0(esr) != 3 || ISS_MSR_OP1(esr) != 3 ||
-	    ISS_MSR_CRn(esr) != 14 || ISS_MSR_CRm(esr) != 3 ||
+	    ISS_MSR_CRn(esr) != 14 || ISS_MSR_CRm(esr) != 2 ||
 	    ISS_MSR_OP2(esr) != op2 || ISS_MSR_Rt(esr) != rt ||
 	    !!(esr & ISS_MSR_DIR) != read) {
-		warnx("unexpected virtual timer syndrome 0x%llx", esr);
+		warnx("unexpected physical timer syndrome 0x%llx", esr);
 		return (EINVAL);
 	}
 	if (run->vrp_exit->vrs.vrs_pc != pc) {
@@ -197,7 +197,7 @@ main(void)
 	alarm(5);
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to CNTV_CTL_EL0 read");
+		warnc(error, "run to CNTP_CTL_EL0 read");
 		goto out_alarm;
 	}
 	if (check_timer_exit(&run, 2 * sizeof(uint32_t), 1,
@@ -209,12 +209,12 @@ main(void)
 		goto out_alarm;
 	}
 	if ((error = complete_sysreg(fd, &run, 1, READ_VALUE)) != 0) {
-		warnc(error, "complete CNTV_CTL_EL0 read");
+		warnc(error, "complete CNTP_CTL_EL0 read");
 		goto out_alarm;
 	}
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to CNTV_TVAL_EL0 write");
+		warnc(error, "run to CNTP_TVAL_EL0 write");
 		goto out_alarm;
 	}
 	if (check_timer_exit(&run, 3 * sizeof(uint32_t), 0,
@@ -228,7 +228,7 @@ main(void)
 		goto out_alarm;
 	}
 	if ((error = complete_sysreg(fd, &run, 0, 0)) != 0) {
-		warnc(error, "complete CNTV_TVAL_EL0 write");
+		warnc(error, "complete CNTP_TVAL_EL0 write");
 		goto out_alarm;
 	}
 
@@ -244,7 +244,7 @@ main(void)
 		goto out_alarm;
 	}
 
-	printf("preserved CNTKCTL_EL1 and trapped virtual timer accesses\n");
+	printf("preserved CNTKCTL_EL1 and trapped physical timer accesses\n");
 	ret = 0;
 
 out_alarm:

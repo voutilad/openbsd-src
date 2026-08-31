@@ -56,6 +56,9 @@
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 
+/* CNTHCTL_EL2.EL1PCTEN moves from bit 0 to bit 10 when E2H is set. */
+#define CNTHCTL_EL1PCTEN_VHE	(1 << 10)
+
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t);
 
@@ -496,8 +499,17 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;
 	run->avr_cntvoff_el2 = 0;
-	/* vmd emulates CNTV_{TVAL,CVAL,CTL}; CNTVCT remains a native read. */
-	run->avr_cnthctl_el2 = CNTHCTL_EL1TVT;
+	/*
+	 * Keep the physical counter readable, but trap EL1 programming of the
+	 * physical timer.  Unlike trapping the virtual timer, this mechanism is
+	 * available without FEAT_ECV and therefore also works when vmm itself is
+	 * nested under a hypervisor that exposes only the baseline timer controls.
+	 * CNTHCTL_EL2 uses different enable bits in VHE and non-VHE modes.
+	 */
+	if (arm64_has_el2 == 2)
+		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN_VHE;
+	else
+		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN;
 }
 
 static void

@@ -230,7 +230,7 @@ struct arm64_vmm_run {
 	/* Invalidate this VMID's cached stage-2 translations before entry. */
 	uint64_t	avr_flush_tlb;
 	uint64_t	avr_cntvoff_el2;
-	/* Trap guest timer programming while leaving CNTVCT_EL0 readable. */
+	/* Trap guest physical-timer programming while leaving its counter readable. */
 	uint64_t	avr_cnthctl_el2;
 
 	/* Host state overwritten while the guest context is installed. */
