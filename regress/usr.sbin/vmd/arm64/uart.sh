@@ -69,10 +69,10 @@ startout="$(${VMCTL} start -m 64M -b "${OBJDIR}/guest.elf" \
 tty="$(printf '%s\n' "${startout}" | sed -n 's/^.*tty //p')"
 [ -c "${tty}" ] || fail "vmctl did not return a console device"
 
-# guest.S has a bounded delay so this reader is attached before PL011 output.
+# The assembly entry has a bounded delay so this reader precedes PL011 output.
 timeout 7 cat "${tty}" >"${console}" 2>&1 || true
 
-grep -q "arm64 vmd PL011 works" "${console}" ||
-	fail "guest did not write the expected PL011 message"
+grep -q "arm64 vmd FDT + polling PL011 works" "${console}" ||
+	fail "guest did not discover and write to the FDT-described PL011"
 ${VMCTL} status "${vmname}" | grep -q "${vmname}" ||
 	fail "guest did not remain halted after HVC"

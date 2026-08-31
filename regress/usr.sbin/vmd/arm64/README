@@ -1,0 +1,42 @@
+Minimal arm64 FDT/PL011 payload
+===============================
+
+guest.elf is a freestanding, fixed-address AArch64 executable for manually
+exercising the first vmd arm64 backend.  vmd loads it at 0x40000000, builds a
+minimal FDT in the last 16KB page of guest RAM, and enters the payload with the
+FDT guest-physical address in x2.  The payload reads /chosen/stdout-path,
+resolves the UART node, verifies its arm,pl011 compatibility, decodes reg, and
+uses that address for polling output.  Its success line therefore checks both
+the FDT handoff and MMIO emulation.
+
+Build vmd and the payload:
+
+	cd /usr/src/usr.sbin/vmd
+	make
+	cd /usr/src/regress/usr.sbin/vmd/arm64
+	make guest.elf
+
+Make sure the installed vmd service is stopped, then run the newly built
+daemon in one terminal:
+
+	cd /usr/src/usr.sbin/vmd
+	doas ./vmd -d -f /dev/null
+
+Start and attach to the toy guest from another terminal:
+
+	doas vmctl start -c -m 64M \
+	    -b /usr/src/regress/usr.sbin/vmd/arm64/guest.elf arm64-fdt
+
+The console should print:
+
+	arm64 vmd FDT + polling PL011 works
+
+The payload then issues HVC and remains parked without consuming a host CPU.
+Detach with the vmctl console escape and stop it when finished:
+
+	doas vmctl stop -f arm64-fdt
+
+The automated form builds the same ELF and manages a private vmd instance:
+
+	cd /usr/src/regress/usr.sbin/vmd/arm64
+	doas make VMD=/usr/src/usr.sbin/vmd/vmd regress

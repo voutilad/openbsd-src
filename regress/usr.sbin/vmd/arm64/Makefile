@@ -8,18 +8,24 @@ regress:
 VMD?=		/usr/sbin/vmd
 VMCTL?=		/usr/sbin/vmctl
 
-CLEANFILES+=	guest.o guest.elf console.out vmd.log
+CLEANFILES+=	guest.o guest_start.o guest.elf console.out vmd.log
 
-REGRESS_TARGETS=	run-regress-uart
+REGRESS_TARGETS=	run-regress-fdt-uart
 REGRESS_ROOT_TARGETS=	${REGRESS_TARGETS}
 
-guest.o: guest.S
+guest_start.o: guest.S
 	${CC} -c -o $@ ${.CURDIR}/guest.S
 
-guest.elf: guest.o guest.ld
-	${LD} -nopie -T ${.CURDIR}/guest.ld -o $@ guest.o
+guest.o: guest.c
+	${CC} -O2 -Wall -Wextra -ffreestanding -fno-builtin \
+	    -fno-stack-protector \
+	    -fno-pie -fno-unwind-tables -fno-asynchronous-unwind-tables \
+	    -c -o $@ ${.CURDIR}/guest.c
 
-run-regress-uart: guest.elf
+guest.elf: guest_start.o guest.o guest.ld
+	${LD} -nopie -T ${.CURDIR}/guest.ld -o $@ guest_start.o guest.o
+
+run-regress-fdt-uart: guest.elf
 	${SUDO} env VMD=${VMD} VMCTL=${VMCTL} OBJDIR=${.OBJDIR} \
 	    sh ${.CURDIR}/uart.sh
 
