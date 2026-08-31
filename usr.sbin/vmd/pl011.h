@@ -18,7 +18,9 @@
 #ifndef _VMD_PL011_H_
 #define _VMD_PL011_H_
 
-void	pl011_init(int);
-int	pl011_mmio(paddr_t, int, uint32_t *);
+void	pl011_init(int, uint32_t);
+void	pl011_pause(void);
+void	pl011_unpause(void);
+int	pl011_mmio(paddr_t, size_t, int, uint32_t *);
 
 #endif /* _VMD_PL011_H_ */

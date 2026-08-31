@@ -298,7 +298,7 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 	}
 	gicv3_init(vm->vm_vmmid);
 	arm64_timer_init(vm->vm_vmmid);
-	pl011_init(con_fd);
+	pl011_init(con_fd, vm->vm_vmmid);
 	return (0);
 }
 
@@ -307,6 +307,7 @@ pause_vm_md(struct vmd_vm *vm)
 {
 	(void)vm;
 	arm64_timer_pause();
+	pl011_pause();
 }
 
 void
@@ -314,6 +315,7 @@ unpause_vm_md(struct vmd_vm *vm)
 {
 	(void)vm;
 	arm64_timer_unpause();
+	pl011_unpause();
 }
 
 struct vm_mem_range *
@@ -484,10 +486,8 @@ arm64_mmio_access(paddr_t gpa, size_t len, int write, uint64_t *data)
 	/* PL011 exposes 32-bit registers even though the MMIO layer is wider. */
 	if (gpa >= ARM64_UART_BASE &&
 	    gpa - ARM64_UART_BASE < ARM64_UART_SIZE) {
-		if (len != sizeof(uart_data))
-			return (EOPNOTSUPP);
 		uart_data = *data;
-		error = pl011_mmio(gpa, write, &uart_data);
+		error = pl011_mmio(gpa, len, write, &uart_data);
 		if (!write)
 			*data = uart_data;
 		return (error);

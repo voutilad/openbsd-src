@@ -230,6 +230,7 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	struct fdt_head header;
 	uint32_t cpu_reg[2] = { 0, 0 };
 	uint32_t timer_interrupt[3];
+	uint32_t uart_interrupt[3];
 	uint64_t dtb_gpa, usable_ram;
 	size_t strings_off, struct_off, struct_size;
 
@@ -313,10 +314,16 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_end_node(&w) == -1)
 		goto nospc;
 
+	/* SPI 1 is architectural INTID 33, driven by the emulated PL011. */
+	uart_interrupt[0] = htobe32(0);
+	uart_interrupt[1] = htobe32(ARM64_UART_INTID - 32);
+	uart_interrupt[2] = htobe32(4);
 	if (fdt_begin_node(&w, "uart@9000000") == -1 ||
 	    fdt_prop(&w, FDT_NAMEOFF(compatible), uart_compat,
 	    sizeof(uart_compat)) == -1 ||
 	    fdt_prop_reg(&w, ARM64_UART_BASE, 0x1000) == -1 ||
+	    fdt_prop(&w, FDT_NAMEOFF(interrupts), uart_interrupt,
+	    sizeof(uart_interrupt)) == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(status), "okay") == -1 ||
 	    fdt_end_node(&w) == -1 || fdt_end_node(&w) == -1 ||
 	    fdt_put_u32(&w, FDT_END) == -1)

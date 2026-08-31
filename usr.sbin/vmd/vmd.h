@@ -442,6 +442,7 @@ enum pipe_msg_type {
 	VMMCI_SET_TIMEOUT_SHORT,
 	VMMCI_SET_TIMEOUT_LONG,
 	ARM64_TIMER_RESCHEDULE,
+	PL011_RX_RESUME,
 };
 
 static inline struct sockaddr_in *

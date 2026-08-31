@@ -15,7 +15,7 @@ _start:
 	 * open its slave before producing the one message the test verifies.
 	 * This loop is bounded; after output, HVC provides the real idle state.
 	 */
-	ldr	x4, =100000000
+	ldr	x4, =20000000
 0:
 	subs	x4, x4, #1
 	b.ne	0b

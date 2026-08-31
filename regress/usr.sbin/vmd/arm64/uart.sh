@@ -11,6 +11,7 @@ vmname="regress-vmd-arm64-$$"
 console="${OBJDIR}/console.out"
 vmdlog="${OBJDIR}/vmd.log"
 vmdpid=
+consolepid=
 startout=
 tty=
 
@@ -23,11 +24,16 @@ cleanup()
 		kill "${vmdpid}" >/dev/null 2>&1
 		wait "${vmdpid}" >/dev/null 2>&1
 	fi
+	if [ -n "${consolepid}" ]; then
+		kill "${consolepid}" >/dev/null 2>&1
+		wait "${consolepid}" >/dev/null 2>&1
+	fi
 }
 
 fail()
 {
 	echo "$1" >&2
+	[ ! -s "${console}" ] || cat "${console}" >&2
 	[ ! -s "${vmdlog}" ] || cat "${vmdlog}" >&2
 	exit 1
 }
@@ -69,12 +75,42 @@ startout="$(${VMCTL} start -m 64M -b "${OBJDIR}/guest.elf" \
 tty="$(printf '%s\n' "${startout}" | sed -n 's/^.*tty //p')"
 [ -c "${tty}" ] || fail "vmctl did not return a console device"
 
-# The assembly entry has a bounded delay so this reader precedes PL011 output.
-timeout 7 cat "${tty}" >"${console}" 2>&1 || true
+# Keep one read/write descriptor so this script can both capture guest output
+# and inject the byte used to exercise the PL011 receive interrupt.
+exec 3<>"${tty}"
+stty raw -echo <&3
+cat <&3 >"${console}" 2>&1 &
+consolepid=$!
+
+i=0
+while [ ${i} -lt 100 ]; do
+	grep -q "arm64 vmd waiting for PL011 input" "${console}" && break
+	kill -0 "${consolepid}" 2>/dev/null || fail "console reader exited"
+	i=$((i + 1))
+	sleep 0.1
+done
+grep -q "arm64 vmd waiting for PL011 input" "${console}" ||
+	fail "guest did not enable PL011 receive interrupts"
+printf x >&3
+
+i=0
+while [ ${i} -lt 50 ]; do
+	grep -q "arm64 vmd PL011 RX interrupt works" "${console}" && break
+	i=$((i + 1))
+	sleep 0.1
+done
+kill "${consolepid}" >/dev/null 2>&1 || true
+wait "${consolepid}" >/dev/null 2>&1 || true
+consolepid=
+exec 3>&-
 
 grep -q "arm64 vmd FDT + GICv3 SPI interrupt works" "${console}" ||
 	fail "guest did not take, acknowledge, and EOI the FDT-described GICv3 SPI"
 grep -q "arm64 vmd physical timer PPI works" "${console}" ||
 	fail "guest did not take and clear the FDT-described physical timer PPI"
+grep -q "arm64 vmd PL011 TX interrupt works" "${console}" ||
+	fail "guest did not take the PL011 transmit-ready interrupt"
+grep -q "arm64 vmd PL011 RX interrupt works" "${console}" ||
+	fail "guest did not receive the PTY byte through a PL011 interrupt"
 ${VMCTL} status "${vmname}" | grep -q "${vmname}" ||
 	fail "guest did not remain halted after HVC"

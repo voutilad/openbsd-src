@@ -35,6 +35,7 @@
 #define ARM64_RAM_BASE		0x40000000UL
 #define ARM64_UART_BASE		0x09000000UL
 #define ARM64_UART_SIZE		ARM64_STAGE2_PAGE_SIZE
+#define ARM64_UART_INTID	33
 #define ARM64_FDT_SIZE		ARM64_STAGE2_PAGE_SIZE
 
 int	arm64_fdt_build(void *, size_t, size_t, size_t *);

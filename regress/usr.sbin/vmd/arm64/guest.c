@@ -44,6 +44,11 @@ typedef unsigned long usize;
 #define PL011_DR	0x00
 #define PL011_FR	0x18
 #define PL011_FR_TXFF	(1U << 5)
+#define PL011_IMSC	0x38
+#define PL011_MIS	0x40
+#define  PL011_INT_RX	(1U << 4)
+#define  PL011_INT_TX	(1U << 5)
+#define PL011_ICR	0x44
 #define FALLBACK_UART	0x09000000UL
 
 #define GICD_CTLR	0x0000
@@ -105,6 +110,9 @@ static int	walk_next(struct fdt_walk *, struct fdt_item *);
 static void	uart_puts(u64, const char *);
 
 static volatile u32 guest_intid = GIC_SPURIOUS;
+static volatile u32 guest_uart_data;
+static volatile u32 guest_uart_tx_irq;
+static volatile u32 *guest_uart;
 
 void	guest_main(const void *);
 void	guest_irq(void);
@@ -462,6 +470,7 @@ write_cntp_tval(u64 value)
 void
 guest_irq(void)
 {
+	u32 mis;
 	u64 iar;
 
 	/* IAR returns and activates the selected INTID; EOIR deactivates it. */
@@ -469,6 +478,17 @@ guest_irq(void)
 	guest_intid = iar & 0xffffff;
 	if (guest_intid == TIMER_INTID)
 		write_cntp_ctl(0);
+	else if (guest_intid == TEST_INTID && guest_uart != (void *)0) {
+		mis = guest_uart[PL011_MIS / sizeof(u32)];
+		if ((mis & PL011_INT_RX) != 0) {
+			guest_uart_data = guest_uart[PL011_DR / sizeof(u32)] & 0xff;
+			guest_uart[PL011_ICR / sizeof(u32)] = PL011_INT_RX;
+		}
+		if ((mis & PL011_INT_TX) != 0) {
+			guest_uart[PL011_IMSC / sizeof(u32)] &= ~PL011_INT_TX;
+			guest_uart_tx_irq = 1;
+		}
+	}
 	write_icc_eoir1(iar);
 }
 
@@ -493,6 +513,7 @@ guest_main(const void *fdt)
 	priority = (volatile u8 *)(gic.dist + GICD_IPRIORITYR);
 	rpriority = (volatile u8 *)(gic.redist + GICR_IPRIORITYR);
 	router = (volatile u64 *)(gic.dist + GICD_IROUTER);
+	guest_uart = (volatile u32 *)uart;
 
 	/* Wake the one Redistributor and clear all old SPI state. */
 	waker = redist[GICR_WAKER / sizeof(u32)];
@@ -546,4 +567,32 @@ guest_main(const void *fdt)
 		uart_puts(uart, "arm64 vmd physical timer PPI works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd timer returned wrong INTID\r\n");
+
+	/* Reconfigure SPI 33 as the level source described for the PL011. */
+	config = dist[(GICD_ICFGR + (TEST_INTID / 16) * sizeof(u32)) /
+	    sizeof(u32)];
+	config &= ~(3U << (2 * (TEST_INTID & 15)));
+	dist[(GICD_ICFGR + (TEST_INTID / 16) * sizeof(u32)) /
+	    sizeof(u32)] = config;
+
+	/* The empty transmitter is a level source while TXIM is enabled. */
+	guest_intid = GIC_SPURIOUS;
+	guest_uart_tx_irq = 0;
+	guest_uart[PL011_IMSC / sizeof(u32)] = PL011_INT_TX;
+	while (!guest_uart_tx_irq)
+		__asm volatile("wfi" ::: "memory");
+	uart_puts(uart, "arm64 vmd PL011 TX interrupt works\r\n");
+
+	/* uart.sh supplies one byte through the PTY after seeing this marker. */
+	guest_intid = GIC_SPURIOUS;
+	guest_uart_data = 0;
+	guest_uart[PL011_IMSC / sizeof(u32)] = PL011_INT_RX;
+	uart_puts(uart, "arm64 vmd waiting for PL011 input\r\n");
+	while (guest_uart_data == 0)
+		__asm volatile("wfi" ::: "memory");
+	guest_uart[PL011_IMSC / sizeof(u32)] = 0;
+	if (guest_uart_data == 'x')
+		uart_puts(uart, "arm64 vmd PL011 RX interrupt works\r\n");
+	else
+		uart_puts(uart, "arm64 vmd PL011 received wrong byte\r\n");
 }
