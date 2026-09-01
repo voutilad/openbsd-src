@@ -34,22 +34,22 @@
 
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
-#define READ_VALUE	0xa5
-#define WRITE_VALUE	0x5a
+#define BPR1_VALUE	2
 #define GUEST_RESULT	0x42
 
 /*
  * HCR_EL2.IMO redirects these ICC_BPR1_EL1 accesses to the virtual CPU
- * interface.  ICH_HCR_EL2.TALL1 must trap both instructions to vmm(4):
+ * interface.  TALL1 remains clear, so both instructions must execute in
+ * hardware and the first public exit must be the explicit HVC:
  *
- *     mrs x2, ICC_BPR1_EL1
  *     msr ICC_BPR1_EL1, x3
+ *     mrs x2, ICC_BPR1_EL1
  *     mov x0, #GUEST_RESULT
  *     hvc #0
  */
 static const uint32_t guest_code[] = {
-	0xd538cc62,
 	0xd518cc63,
+	0xd538cc62,
 	0xd2800840,
 	0xd4000002,
 };
@@ -75,56 +75,6 @@ run_to_exit(int fd, struct vm_run_params *run)
 	} while (run->vrp_exit_reason == VM_EXIT_NONE && !alarm_fired);
 
 	return (alarm_fired ? ETIMEDOUT : 0);
-}
-
-static int
-check_bpr1_exit(struct vm_run_params *run, uint64_t pc, u_int rt, int read)
-{
-	uint64_t esr = run->vrp_exit->vesr;
-
-	if (run->vrp_exit_reason != VM_EXIT_EXCEPTION) {
-		warnx("unexpected exit reason 0x%04x at pc 0x%llx",
-		    run->vrp_exit_reason, run->vrp_exit->vrs.vrs_pc);
-		return (EINVAL);
-	}
-	if (ESR_ELx_EXCEPTION(esr) != EXCP_MSR ||
-	    (esr & ESR_ELx_IL) == 0 ||
-	    ISS_MSR_OP0(esr) != 3 || ISS_MSR_OP1(esr) != 0 ||
-	    ISS_MSR_CRn(esr) != 12 || ISS_MSR_CRm(esr) != 12 ||
-	    ISS_MSR_OP2(esr) != 3 || ISS_MSR_Rt(esr) != rt ||
-	    !!(esr & ISS_MSR_DIR) != read) {
-		warnx("unexpected ICC_BPR1_EL1 syndrome 0x%llx", esr);
-		return (EINVAL);
-	}
-	if (run->vrp_exit->vrs.vrs_pc != pc) {
-		warnx("unexpected trapped pc 0x%llx, wanted 0x%llx",
-		    run->vrp_exit->vrs.vrs_pc, pc);
-		return (EINVAL);
-	}
-	return (0);
-}
-
-static int
-complete_sysreg(int fd, struct vm_run_params *run, int read,
-    uint64_t value)
-{
-	struct vm_rwregs_params write;
-	u_int rt = ISS_MSR_Rt(run->vrp_exit->vesr);
-
-	/* A read supplies Rt; a write consumes it.  Both retire by advancing PC. */
-	if (read && rt != 31)
-		run->vrp_exit->vrs.vrs_gprs[rt] = value;
-	run->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
-
-	memset(&write, 0, sizeof(write));
-	write.vrwp_vm_id = run->vrp_vm_id;
-	write.vrwp_vcpu_id = run->vrp_vcpu_id;
-	write.vrwp_mask = VM_RWREGS_ALL;
-	memcpy(&write.vrwp_regs, &run->vrp_exit->vrs,
-	    sizeof(write.vrwp_regs));
-	if (ioctl(fd, VMM_IOC_WRITEREGS, &write) == -1)
-		return (errno);
-	return (0);
 }
 
 int
@@ -168,7 +118,7 @@ main(void)
 	memset(&reset, 0, sizeof(reset));
 	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_sp = GUEST_MEM_SIZE;
-	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X3] = WRITE_VALUE;
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X3] = BPR1_VALUE;
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
 	reset.vrp_init_state.vrs_sctlr_el1 = SCTLR_RES1;
@@ -191,47 +141,20 @@ main(void)
 	alarm(5);
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to ICC_BPR1_EL1 read");
-		goto out_alarm;
-	}
-	if (check_bpr1_exit(&run, 0, VCPU_REGS_X2, 1) != 0)
-		goto out_alarm;
-	if ((error = complete_sysreg(fd, &run, 1, READ_VALUE)) != 0) {
-		warnc(error, "complete ICC_BPR1_EL1 read");
-		goto out_alarm;
-	}
-
-	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to ICC_BPR1_EL1 write");
-		goto out_alarm;
-	}
-	if (check_bpr1_exit(&run, sizeof(uint32_t), VCPU_REGS_X3, 0) != 0)
-		goto out_alarm;
-	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != READ_VALUE ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X3] != WRITE_VALUE) {
-		warnx("bad register values: x2=0x%llx x3=0x%llx",
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X2],
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X3]);
-		goto out_alarm;
-	}
-	if ((error = complete_sysreg(fd, &run, 0, 0)) != 0) {
-		warnc(error, "complete ICC_BPR1_EL1 write");
-		goto out_alarm;
-	}
-
-	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to HVC");
+		warnc(error, "run through hardware ICC_BPR1_EL1");
 		goto out_alarm;
 	}
 	if (run.vrp_exit_reason != VM_EXIT_HVC ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT) {
-		warnx("guest did not resume after ICC completion: reason 0x%04x "
-		    "x0=0x%llx esr=0x%llx", run.vrp_exit_reason,
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0], vmexit.vesr);
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != BPR1_VALUE) {
+		warnx("unexpected ICC result: reason 0x%04x x0=0x%llx "
+		    "bpr1=0x%llx esr=0x%llx", run.vrp_exit_reason,
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0],
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X2], vmexit.vesr);
 		goto out_alarm;
 	}
 
-	printf("trapped and completed ICC_BPR1_EL1 read/write accesses\n");
+	printf("executed ICC_BPR1_EL1 read/write without a software exit\n");
 	ret = 0;
 
 out_alarm:

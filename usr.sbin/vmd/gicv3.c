@@ -39,12 +39,11 @@
  *  - GICR_* MMIO registers hold the one vCPU's SGI/PPI state.
  *  - ICC_*_EL1 system registers select, acknowledge, and complete IRQs.
  *
- * vmm(4) does not know any interrupt identity or distributor state.  The
- * gicv3_candidate_locked() predicate below selects userland's best INTID and
- * passes only its priority through VMM_IOC_INTR.  One hardware List Register
- * applies the guest-resident ICC_PMR_EL1 mask, while trapped IAR and EOIR
- * accesses leave acknowledge and active state here.  Reading IAR moves one
- * INTID from pending to active; writing EOIR moves it back to inactive.
+ * vmd retains the Distributor and Redistributor MMIO model.  The
+ * gicv3_candidate_locked() predicate selects its best INTID and passes that
+ * identity, priority, and line level through VMM_IOC_INTR.  The hardware
+ * virtual CPU interface then applies PMR/BPR/group policy and completes IAR
+ * and EOIR without any guest instruction decoding in the kernel.
  *
  * This first increment intentionally describes one Redistributor, one vCPU,
  * and 64 INTIDs (32 private plus 32 SPIs).  It implements no ITS, LPIs,
@@ -121,10 +120,11 @@ struct gicv3_dev {
 	uint64_t	 gd_route[GICV3_NINTIDS];
 	uint32_t	 gd_waker;
 
-	/* The one vCPU's trapped CPU-interface state and encoded IRQ signal. */
+	/* Userland's current selection installed in the hardware CPU interface. */
 	uint8_t		 gd_bpr1;
 	uint8_t		 gd_igrpen1;
-	uint8_t		 gd_irq_signal;
+	uint16_t	 gd_irq_intid;
+	uint8_t		 gd_irq_priority;
 };
 
 static struct gicv3_dev gicv3 = {
@@ -172,7 +172,8 @@ gicv3_init(uint32_t vm_id)
 	/* IGRPEN1 zero masks every IRQ until guest initialization. */
 	gicv3.gd_bpr1 = 0;
 	gicv3.gd_igrpen1 = 0;
-	gicv3.gd_irq_signal = VMM_INTR_PRIO_NONE;
+	gicv3.gd_irq_intid = GICV3_SPURIOUS;
+	gicv3.gd_irq_priority = 0xff;
 	mutex_unlock(&gicv3.gd_mtx);
 }
 
@@ -199,34 +200,28 @@ gicv3_running_priority_locked(void)
 /*
  * Select the deliverable Group-1 interrupt with the highest priority.  The
  * first model has one vCPU, so a zero IROUTER affinity is its only route.
- * Binary-point priority grouping is intentionally deferred; comparing the
- * complete priority byte is sufficient for the initial non-nested case.
- * ICC_PMR_EL1 is intentionally absent from this predicate.  vmm(4)'s one
- * priority-bearing List Register lets the hardware virtual CPU interface
- * apply that high-frequency per-vCPU mask without userspace exits.
+ * Binary-point, PMR, group-enable, and running-priority policy is absent from
+ * this predicate because the hardware virtual CPU interface applies it.  The
+ * current one-LR backend queues only the best userland candidate; a later
+ * multi-LR extension can publish more candidates without changing the MMIO
+ * model or moving instruction emulation into the kernel.
  */
 static int
 gicv3_candidate_locked(void)
 {
 	uint8_t best_priority = 0xff;
-	uint8_t running_priority;
 	uint32_t bit;
 	int best = GICV3_SPURIOUS, intid, word;
 
-	/* Both the Distributor and CPU interface must permit Group-1 delivery. */
-	if ((gicv3.gd_ctlr & GICD_CTLR_ENABLE_G1) == 0 ||
-	    gicv3.gd_igrpen1 == 0)
+	/* CPU-interface enables are hardware-resident; userland owns GICD_CTLR. */
+	if ((gicv3.gd_ctlr & GICD_CTLR_ENABLE_G1) == 0)
 		return (GICV3_SPURIOUS);
-	running_priority = gicv3_running_priority_locked();
 	for (intid = 0; intid < GICV3_NINTIDS; intid++) {
 		word = gicv3_word(intid);
 		bit = gicv3_bit(intid);
-		/* Running priority uses the GIC's strict, inverted comparison. */
 		if ((gicv3.gd_group[word] & bit) == 0 ||
 		    (gicv3.gd_enabled[word] & bit) == 0 ||
-		    (gicv3.gd_pending[word] & bit) == 0 ||
-		    (gicv3.gd_active[word] & bit) != 0 ||
-		    gicv3.gd_priority[intid] >= running_priority)
+		    (gicv3.gd_pending[word] & bit) == 0)
 			continue;
 		/* Affinity zero names the sole Redistributor/vCPU. */
 		if (intid >= GICV3_SPI_BASE && gicv3.gd_route[intid] != 0)
@@ -240,26 +235,35 @@ gicv3_candidate_locked(void)
 	return (best);
 }
 
-/* Drive vmm(4)'s identity-free, priority-qualified IRQ signal. */
+/*
+ * Publish the best Distributor/Redistributor candidate to vmm(4)'s one
+ * identity- and priority-qualified hardware LR.  Device state remains in
+ * userland.  In particular, level devices lower their input after the guest
+ * services them, causing this routine to withdraw the candidate or select the
+ * next one.
+ */
 static int
 gicv3_drive_locked(void)
 {
-	uint8_t signal;
 	int error, intid;
 
 	intid = gicv3_candidate_locked();
-	if (intid == GICV3_SPURIOUS)
-		signal = VMM_INTR_PRIO_NONE;
-	else
-		signal = VMM_INTR_PRIO_ENCODE(gicv3.gd_priority[intid]);
-	if (signal == gicv3.gd_irq_signal)
+	if (intid == gicv3.gd_irq_intid &&
+	    (intid == GICV3_SPURIOUS ||
+	    gicv3.gd_priority[intid] == gicv3.gd_irq_priority))
 		return (0);
-	/* vip_intr carries priority plus one, never the selected INTID. */
-	error = vcpu_intr(gicv3.gd_vm_id, 0, signal);
+	if (intid == GICV3_SPURIOUS)
+		error = arm64_vcpu_intr(gicv3.gd_vm_id, 0, 0, 0,
+		    VMM_INTR_LEVEL_LOW);
+	else
+		error = arm64_vcpu_intr(gicv3.gd_vm_id, 0, intid,
+		    gicv3.gd_priority[intid], VMM_INTR_LEVEL_HIGH);
 	if (error != 0)
 		return (error);
-	gicv3.gd_irq_signal = signal;
-	if (signal != VMM_INTR_PRIO_NONE) {
+	gicv3.gd_irq_intid = intid;
+	gicv3.gd_irq_priority = intid == GICV3_SPURIOUS ? 0xff :
+	    gicv3.gd_priority[intid];
+	if (intid != GICV3_SPURIOUS) {
 		/* An asynchronous device may pend the IRQ while WFI sleeps. */
 		vcpu_unhalt(0);
 		vcpu_signal_run(0);
@@ -270,7 +274,7 @@ gicv3_drive_locked(void)
 /*
  * Close the race between a trapped WFI and an interrupt which became pending
  * immediately before the vCPU thread marked itself halted.  gicv3_drive_locked()
- * wakes on a change in the priority signal; if that signal was already
+ * wakes when the selected interrupt changes; if that interrupt was already
  * asserted, no later edge exists to wake the condition-variable wait.
  *
  * The caller parks the vCPU first, then invokes this check.  Taking gd_mtx
@@ -582,11 +586,13 @@ gicv3_sysreg_is(uint64_t esr, int op0, int op1, int crn, int crm, int op2)
 }
 
 /*
- * Emulate the trapped part of the GICv3 system-register CPU interface.
- * ICH_HCR_EL2.TALL1 makes Group 1 accesses arrive as EXCP_MSR exits.  Common
- * registers are hardware-resident: notably ICC_PMR_EL1 is backed by
- * ICH_VMCR_EL2, avoiding hundreds of userspace exits per timer interrupt.
- * Reads of IAR acknowledge a pending interrupt; EOIR writes deactivate it.
+ * Compatibility handler for a CPU-interface register which still traps on a
+ * CPU that implements less of the architectural virtual interface than the
+ * normal vmm(4) backend expects.  TALL1 remains clear in the normal path, so
+ * IAR, EOIR, PMR, BPR, and IGRPEN1 execute against ICH state in hardware and
+ * never reach this routine.  Keeping the old narrow handler makes an
+ * unexpected implementation-defined trap diagnosable without asking the
+ * kernel to decode or emulate the guest instruction.
  */
 int
 gicv3_icc(uint64_t esr, int write, uint64_t *data)

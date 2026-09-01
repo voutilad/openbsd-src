@@ -378,11 +378,34 @@ read_mem(paddr_t src, void *buf, size_t len)
 	return (0);
 }
 
+/*
+ * Present an already-selected GIC interrupt to vmm(4)'s hardware CPU
+ * interface.  The ioctl carries controller state, not an emulated guest
+ * instruction: vmd retains all Distributor and Redistributor MMIO policy,
+ * while IAR and EOIR execute directly against an EL2 List Register.
+ */
+int
+arm64_vcpu_intr(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
+    uint8_t priority, int asserted)
+{
+	struct vm_intr_params vip;
+
+	memset(&vip, 0, sizeof(vip));
+	vip.vip_vm_id = vm_id;
+	vip.vip_vcpu_id = vcpu_id;
+	vip.vip_intr = intid;
+	vip.vip_priority = priority;
+	vip.vip_level = asserted ? VMM_INTR_LEVEL_HIGH : VMM_INTR_LEVEL_LOW;
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_INTR, &vip) == -1)
+		return (errno);
+	return (0);
+}
+
 int
 intr_pending(int vcpu_id)
 {
 	/* The arm64 GIC drives VMM_IOC_INTR directly, not the x86 injection ABI. */
-	(void)vm;
+	(void)vcpu_id;
 	return (0);
 }
 
@@ -398,7 +421,7 @@ intr_toggle_el(struct vmd_vm *vm, int irq, int val)
 int
 intr_ack(int vcpu_id)
 {
-	/* The guest acknowledges an INTID by reading ICC_IAR1_EL1. */
+	/* The hardware virtual CPU interface completes ICC_IAR1_EL1. */
 	(void)vm;
 	return (-1);
 }

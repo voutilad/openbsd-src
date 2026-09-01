@@ -66,6 +66,12 @@
 #define VMM_TLBI_VAAE1IS	4
 #define VMM_TLBI_ASIDE1IS	5
 
+/* Atomic software form of the one interrupt selected by userland. */
+#define VMM_INTR_VALID		(1UL << 63)
+#define VMM_INTR_INTID_MASK	0xffffUL
+#define VMM_INTR_PRIORITY_SHIFT	16
+#define VMM_INTR_PRIORITY_MASK	(0xffUL << VMM_INTR_PRIORITY_SHIFT)
+
 /* CNTHCTL_EL2.EL1PCTEN moves from bit 0 to bit 10 when E2H is set. */
 #define CNTHCTL_EL1PCTEN_VHE	(1 << 10)
 
@@ -80,6 +86,7 @@ static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
 static int	arm64_vmm_is_tlbi(uint64_t);
+static void	arm64_vmm_load_intr(struct vcpu *);
 static void	arm64_vmm_load_run(struct vcpu *, int);
 static void	arm64_vmm_save_run(struct vcpu *);
 
@@ -208,24 +215,29 @@ arm64_vmm_intr_pending(struct vm_intr_params *vip)
 		ret = ENOENT;
 		goto out;
 	}
-	if (vip->vip_intr > VMM_INTR_PRIO_MAX) {
+	if (vip->vip_intr > VMM_INTR_MAX ||
+	    vip->vip_level > VMM_INTR_LEVEL_HIGH) {
 		ret = EINVAL;
 		goto out;
 	}
 
 	/*
-	 * vip_intr is deliberately not an INTID.  Zero withdraws the signal;
-	 * values 1 through 255 assert it and encode GIC priority 0 through 254.
-	 * Userland owns interrupt identity and all distributor/redistributor
-	 * state.  The kernel uses the priority only to let the hardware virtual
-	 * CPU interface apply the guest's ICC_PMR_EL1 mask without an exit.
+	 * Userland still owns the distributor and redistributor.  This ioctl
+	 * communicates only their currently selected level interrupt to the
+	 * hardware virtual CPU interface.  Packing identity, priority, and level
+	 * into one naturally aligned word gives vm_run() a coherent snapshot while
+	 * this ioctl interrupts a running vCPU without taking vc_lock.
 	 *
-	 * vm_run() holds vc_lock across guest execution, so this ioctl cannot use
-	 * that lock: it must be able to interrupt a running vCPU.  The naturally
-	 * aligned value and READ_ONCE/WRITE_ONCE pair make the concurrent access
-	 * indivisible and prevent the compiler from caching it.
+	 * A low level is represented by zero.  A high level carries the real INTID,
+	 * so guest IAR and EOIR accesses can execute in hardware rather than being
+	 * decoded by either vmm(4) or vmd(8).
 	 */
-	WRITE_ONCE(vcpu->vc_intr, vip->vip_intr);
+	if (vip->vip_level == VMM_INTR_LEVEL_HIGH)
+		WRITE_ONCE(vcpu->vc_intr, VMM_INTR_VALID |
+		    ((uint64_t)vip->vip_priority << VMM_INTR_PRIORITY_SHIFT) |
+		    vip->vip_intr);
+	else
+		WRITE_ONCE(vcpu->vc_intr, 0);
 #ifdef MULTIPROCESSOR
 	/*
 	 * A vCPU executing on another CPU will not rebuild HCR_EL2 until it
@@ -353,8 +365,8 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 	    PSR_M_EL1h;
 	vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
-	/* Group enable remains userland policy; hardware only supplies PMR gating. */
-	run->avr_ich_vmcr_el2 = ICH_VMCR_VENG1;
+	/* The guest establishes PMR, BPR, and Group-1 enable through ICC registers. */
+	run->avr_ich_vmcr_el2 = 0;
 	/* A recycled VMID must not inherit translations from an older VM. */
 	run->avr_flush_tlb = 1;
 	return (0);
@@ -399,9 +411,9 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	run->avr_fpcr = 0;
 	run->avr_fpsr = 0;
 	memset(run->avr_pauth, 0, sizeof(run->avr_pauth));
-	run->avr_ich_vmcr_el2 = ICH_VMCR_VENG1;
+	run->avr_ich_vmcr_el2 = 0;
 	run->avr_ich_lr0_el2 = 0;
-	WRITE_ONCE(vcpu->vc_intr, VMM_INTR_PRIO_NONE);
+	WRITE_ONCE(vcpu->vc_intr, 0);
 	return (0);
 }
 
@@ -542,11 +554,47 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 }
 
 static void
+arm64_vmm_load_intr(struct vcpu *vcpu)
+{
+	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	uint64_t intid, lr, signal, state;
+
+	/*
+	 * LR0 is architectural state, not a level latch which can be overwritten
+	 * on every entry.  In particular, an active LR must retain its INTID until
+	 * the guest executes EOIR.  Userland may lower that device or select a
+	 * different pending interrupt in the meantime; the atomic signal remains
+	 * queued and is installed after hardware reports the LR invalid.
+	 *
+	 * A merely pending LR has not been acknowledged and is safe to withdraw or
+	 * replace.  This is what lets a device deassert before IAR without leaving
+	 * a phantom interrupt in the virtual CPU interface.
+	 */
+	signal = READ_ONCE(vcpu->vc_intr);
+	lr = run->avr_ich_lr0_el2;
+	state = lr & ICH_LR_STATE_MASK;
+	if (state == ICH_LR_ACTIVE ||
+	    state == (ICH_LR_ACTIVE | ICH_LR_PENDING)) {
+		/* Never retain a speculative re-pend after the selected line moved. */
+		run->avr_ich_lr0_el2 = lr & ~ICH_LR_PENDING;
+		return;
+	}
+	if ((signal & VMM_INTR_VALID) == 0) {
+		run->avr_ich_lr0_el2 = 0;
+		return;
+	}
+
+	intid = signal & VMM_INTR_INTID_MASK;
+	run->avr_ich_lr0_el2 = ICH_LR_PENDING | ICH_LR_GROUP1 | intid |
+	    (((signal & VMM_INTR_PRIORITY_MASK) >> VMM_INTR_PRIORITY_SHIFT) <<
+	    ICH_LR_PRIORITY_SHIFT);
+}
+
+static void
 arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 {
 	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	struct vcpu_reg_state *vrs = &vcpu->vc_regs;
-	uint16_t intr;
 
 	memcpy(run->avr_gprs, vrs->vrs_gprs, sizeof(run->avr_gprs));
 	run->avr_sp = vrs->vrs_sp;
@@ -595,30 +643,21 @@ arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 	    HCR_FB | HCR_BSU_IS | HCR_TTLB;
 	/*
 	 * HCR_EL2.IMO makes Non-secure EL1 Group 1 ICC accesses select the
-	 * virtual CPU interface.  TALL1 returns Group 1 acknowledge, EOI, group
-	 * enable, and binary-point accesses to userland, where the GIC model owns
-	 * their state and interrupt identity.  TC remains clear so common
-	 * interface registers, most importantly ICC_PMR_EL1, stay resident in
-	 * ICH_VMCR_EL2 and do not require a userspace round trip on every spl
-	 * transition.
+	 * virtual CPU interface.  Leave TALL1 and TC clear: the guest's IAR, EOIR,
+	 * PMR, BPR, and Group-1 enable instructions then operate on ICH state in
+	 * hardware.  vmm(4) only context-switches that state and never decodes an
+	 * ICC instruction.
 	 */
-	run->avr_ich_hcr_el2 = ICH_HCR_EN | ICH_HCR_TALL1;
+	run->avr_ich_hcr_el2 = ICH_HCR_EN;
 	/*
-	 * One software List Register carries only the pending level and priority.
-	 * Its virtual INTID is a placeholder: TALL1 traps IAR before hardware can
-	 * expose or acknowledge that value, and userland supplies the real INTID.
-	 * The hardware nevertheless compares the LR priority with the guest's
-	 * resident PMR and asserts the virtual IRQ at the architecturally correct
-	 * mask level.  Updating vip_intr replaces or clears this single slot.
+	 * Reconcile the last hardware LR state with userland's selected level on
+	 * every entry.  This is required even when the selected signal did not
+	 * change: after an EOIR or WFI exit an invalid LR must be refilled for a
+	 * still-asserted level interrupt.  load_intr is retained in the entry ABI
+	 * for the surrounding nested-retry policy but no longer gates LR refill.
 	 */
-	if (load_intr) {
-		intr = READ_ONCE(vcpu->vc_intr);
-		run->avr_ich_lr0_el2 = 0;
-		if (intr != VMM_INTR_PRIO_NONE)
-			run->avr_ich_lr0_el2 = ICH_LR_PENDING | ICH_LR_GROUP1 |
-			    ((uint64_t)VMM_INTR_PRIO_DECODE(intr) <<
-			    ICH_LR_PRIORITY_SHIFT);
-	}
+	(void)load_intr;
+	arm64_vmm_load_intr(vcpu);
 	if (arm64_has_el2 == 2)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;

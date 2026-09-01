@@ -129,14 +129,15 @@ struct vm_exit {
 struct vm_intr_params {
 	/* Input parameters to VMM_IOC_INTR */
 	uint32_t		vip_vcpu_id;
-	uint16_t		vip_intr;
+	uint16_t		vip_intr;	/* GIC virtual INTID */
+	uint8_t			vip_priority;	/* GIC priority byte */
+	uint8_t			vip_level;	/* VMM_INTR_LEVEL_* */
 };
 
-/* arm64 priority signal: zero lowers it; otherwise priority is value - 1. */
-#define VMM_INTR_PRIO_NONE	0
-#define VMM_INTR_PRIO_ENCODE(p)	((uint16_t)(p) + 1)
-#define VMM_INTR_PRIO_DECODE(v)	((uint8_t)((v) - 1))
-#define VMM_INTR_PRIO_MAX	VMM_INTR_PRIO_ENCODE(0xfe)
+/* INTIDs 1020 through 1023 are reserved for special GIC responses. */
+#define VMM_INTR_MAX		1019
+#define VMM_INTR_LEVEL_LOW	0
+#define VMM_INTR_LEVEL_HIGH	1
 
 #define VM_RWREGS_GPRS	0x1	/* read/write GPRs */
 #define VM_RWREGS_ALL	(VM_RWREGS_GPRS)
@@ -245,7 +246,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_ich_hcr_el2;
 	/* Guest virtual CPU-interface state retained across exits. */
 	uint64_t	avr_ich_vmcr_el2;
-	/* One priority-bearing pending slot; userland retains the INTID. */
+	/* One hardware List Register carrying guest interrupt identity and state. */
 	uint64_t	avr_ich_lr0_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
@@ -313,8 +314,8 @@ struct vcpu {
 	struct cpu_info		*vc_lastcpu;	/* [v] */
 	/* The saved EL1 bank differs from the last resident VHE EL12 bank. */
 	uint8_t			vc_el12_dirty;	/* [v] */
-	/* Raw virtual IRQ line, written concurrently by VMM_IOC_INTR. */
-	uint16_t		vc_intr;	/* [a] */
+	/* Encoded virtual IRQ identity, priority, and line level. */
+	uint64_t		vc_intr;	/* [a] */
 	/* The last exit snapshot awaits completion by the next VMM_IOC_RUN. */
 	uint8_t			vc_exit_pending;	/* [v] */
 	/* A bounded async yield requests an early protected entry next RUN. */

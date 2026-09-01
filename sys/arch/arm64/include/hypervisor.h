@@ -86,11 +86,7 @@
 #define	HCR_APK		0x0000010000000000
 #define	HCR_API		0x0000020000000000
 
-/*
- * GICv3 virtual interface control.  The ICH_HCR_EL2 trap controls let a
- * userspace interrupt controller emulate the guest-visible ICC_*_EL1 CPU
- * interface without committing vmm(4) to an in-kernel GIC model.
- */
+/* GICv3 hardware virtual CPU-interface state. */
 #define	ICH_HCR_EL2		s3_4_c12_c11_0
 #define	ICH_HCR_EN		(1UL << 0)
 #define	ICH_HCR_TC		(1UL << 10)
@@ -101,8 +97,12 @@
 #define	ICH_VMCR_VENG1		(1UL << 1)
 
 #define	ICH_LR0_EL2		s3_4_c12_c12_0
+#define	ICH_LR_VINTID_MASK	0xffffffffUL
 #define	ICH_LR_PRIORITY_SHIFT	48
+#define	ICH_LR_PRIORITY_MASK	(0xffUL << ICH_LR_PRIORITY_SHIFT)
 #define	ICH_LR_GROUP1		(1UL << 60)
+#define	ICH_LR_STATE_MASK	(3UL << 62)
 #define	ICH_LR_PENDING		(1UL << 62)
+#define	ICH_LR_ACTIVE		(2UL << 62)
 
 #endif

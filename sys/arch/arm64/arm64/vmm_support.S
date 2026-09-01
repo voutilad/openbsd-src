@@ -191,9 +191,9 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	vtcr_el2, x0
 .Lvhe_stage2_ready:
 	/*
-	 * Install the guest's small hardware priority gate while the virtual CPU
-	 * interface is disabled.  LR0 is only a priority-bearing pending signal;
-	 * TALL1 ensures its placeholder INTID is never exposed to the guest.
+	 * Install the guest's hardware CPU-interface state while it is disabled.
+	 * LR0 carries the real INTID, priority, and pending/active lifecycle, so
+	 * guest IAR and EOIR instructions complete without trapping to software.
 	 */
 	msr	ICH_HCR_EL2, xzr
 	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
@@ -533,7 +533,7 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
-	/* See the VHE entry path: LR0 carries priority, never interrupt identity. */
+	/* See the VHE path: LR0 carries identity and its hardware lifecycle. */
 	msr	ICH_HCR_EL2, xzr
 	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
 	msr	ICH_VMCR_EL2, x0
@@ -937,9 +937,15 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_TPIDR_EL1]
 
 .Lsave_guest_done:
-	/* ICC_PMR_EL1 is resident in ICH_VMCR_EL2 while the guest runs. */
+	/*
+	 * VMCR retains PMR, BPR, and group enable.  LR0 may have moved from
+	 * pending to active or invalid when the guest executed IAR/EOIR, so capture
+	 * both before restoring the host virtual CPU interface.
+	 */
 	mrs	x0, ICH_VMCR_EL2
 	str	x0, [x18, #AVR_ICH_VMCR_EL2]
+	mrs	x0, ICH_LR0_EL2
+	str	x0, [x18, #AVR_ICH_LR0_EL2]
 	/* Capture the EL2 syndrome after all guest-visible EL1 state is safe. */
 	mrs	x0, esr_el2
 	str	x0, [x18, #AVR_ESR_EL2]

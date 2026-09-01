@@ -36,16 +36,16 @@
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
 #define GUEST_RESULT	0x42
+#define GUEST_INTID	33
 #define VECTOR_BASE	PAGE_SIZE
 #define IRQ_SPX_OFFSET	0x280
 
-/*
- * Enable all GIC priorities in the hardware-resident PMR, then remain in
- * EL1h until another process raises its virtual IRQ.
- */
+/* Configure the hardware virtual CPU interface, then wait for an IRQ. */
 static const uint32_t guest_spin[] = {
 	0xd2801fe0,	/* mov x0, #0xff */
 	0xd5184600,	/* msr ICC_PMR_EL1, x0 */
+	0xd2800020,	/* mov x0, #1 */
+	0xd518cce0,	/* msr ICC_IGRPEN1_EL1, x0 */
 	0xd5033fdf,	/* isb */
 	0x14000000,	/* b . */
 };
@@ -56,6 +56,8 @@ static const uint32_t guest_spin[] = {
  * architectural vector; merely observing a host-side vCPU exit is not enough.
  */
 static const uint32_t guest_irq[] = {
+	0xd538cc01,	/* mrs x1, ICC_IAR1_EL1 */
+	0xd518cc21,	/* msr ICC_EOIR1_EL1, x1 */
 	0xd2800840,	/* mov x0, #GUEST_RESULT */
 	0xd4000002,	/* hvc #0 */
 };
@@ -143,7 +145,9 @@ main(void)
 		usleep(250000);
 		memset(&intr, 0, sizeof(intr));
 		intr.vip_vm_id = create.vcp_id;
-		intr.vip_intr = VMM_INTR_PRIO_ENCODE(0);
+		intr.vip_intr = GUEST_INTID;
+		intr.vip_priority = 0;
+		intr.vip_level = VMM_INTR_LEVEL_HIGH;
 		if (ioctl(fd, VMM_IOC_INTR, &intr) == -1)
 			err(1, "VMM_IOC_INTR");
 		_exit(0);
@@ -177,9 +181,11 @@ main(void)
 		    run.vrp_exit_reason, vmexit.vesr, vmexit.vrs.vrs_pc);
 		goto out;
 	}
-	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT) {
-		warnx("IRQ vector did not run: x0=0x%llx pc=0x%llx",
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0], vmexit.vrs.vrs_pc);
+	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X1] != GUEST_INTID) {
+		warnx("IRQ vector did not run: x0=0x%llx intid=%llu pc=0x%llx",
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0],
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X1], vmexit.vrs.vrs_pc);
 		goto out;
 	}
 	if (waitpid(child, &status, 0) == -1) {
@@ -195,11 +201,14 @@ main(void)
 	/* Lower the level-triggered line just as a userland GIC eventually will. */
 	memset(&intr, 0, sizeof(intr));
 	intr.vip_vm_id = create.vcp_id;
+	intr.vip_intr = GUEST_INTID;
+	intr.vip_level = VMM_INTR_LEVEL_LOW;
 	if (ioctl(fd, VMM_IOC_INTR, &intr) == -1) {
 		warn("VMM_IOC_INTR clear");
 		goto out;
 	}
-	printf("VMM_IOC_INTR vectored a running guest to its IRQ handler\n");
+	printf("VMM_IOC_INTR delivered INTID %d through hardware IAR/EOIR\n",
+	    GUEST_INTID);
 	ret = 0;
 
 out:

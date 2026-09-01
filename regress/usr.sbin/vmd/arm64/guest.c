@@ -113,6 +113,7 @@ static volatile u32 guest_intid = GIC_SPURIOUS;
 static volatile u32 guest_uart_data;
 static volatile u32 guest_uart_tx_irq;
 static volatile u32 *guest_uart;
+static volatile u32 *guest_dist;
 
 void	guest_main(const void *);
 void	guest_irq(void);
@@ -479,6 +480,15 @@ guest_irq(void)
 	if (guest_intid == TIMER_INTID)
 		write_cntp_ctl(0);
 	else if (guest_intid == TEST_INTID && guest_uart != (void *)0) {
+		/*
+		 * The first hardware-CPU-interface model has one LR but no
+		 * maintenance interrupt with which to report an edge acknowledge
+		 * back to the userland Distributor.  Explicitly clear this synthetic
+		 * software-pended edge before EOI, exactly as the test would clear a
+		 * device condition.  Real UART and timer inputs are level lines and
+		 * deassert through their device models.
+		 */
+		guest_dist[GICD_ICPENDR1 / sizeof(u32)] = TEST_INTID_BIT;
 		mis = guest_uart[PL011_MIS / sizeof(u32)];
 		if ((mis & PL011_INT_RX) != 0) {
 			guest_uart_data = guest_uart[PL011_DR / sizeof(u32)] & 0xff;
@@ -509,6 +519,7 @@ guest_main(const void *fdt)
 		return;
 	}
 	dist = (volatile u32 *)gic.dist;
+	guest_dist = dist;
 	redist = (volatile u32 *)gic.redist;
 	priority = (volatile u8 *)(gic.dist + GICD_IPRIORITYR);
 	rpriority = (volatile u8 *)(gic.redist + GICR_IPRIORITYR);

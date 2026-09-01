@@ -38,6 +38,7 @@
 #define ARM64_UART_INTID	33
 #define ARM64_FDT_SIZE		ARM64_STAGE2_PAGE_SIZE
 
+int	arm64_vcpu_intr(uint32_t, uint32_t, uint16_t, uint8_t, int);
 int	arm64_fdt_build(void *, size_t, size_t, size_t *);
 
 #endif /* _VMD_ARM64_VM_H_ */
