@@ -59,8 +59,17 @@
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 #define VMM_ASYNC_RETRIES	8
 
+/* avr_flush_tlb operations consumed by the EL2 entry assembly. */
+#define VMM_TLBI_VMALLS12E1IS	1
+#define VMM_TLBI_VMALLE1IS	2
+#define VMM_TLBI_VAE1IS		3
+#define VMM_TLBI_VAAE1IS	4
+#define VMM_TLBI_ASIDE1IS	5
+
 /* CNTHCTL_EL2.EL1PCTEN moves from bit 0 to bit 10 when E2H is set. */
 #define CNTHCTL_EL1PCTEN_VHE	(1 << 10)
+
+static struct vcpu *arm64_vmm_resident[MAXCPUS];
 
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t, int, int, int);
@@ -69,10 +78,58 @@ static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
-static void	arm64_vmm_load_run(struct vcpu *);
+static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
+static int	arm64_vmm_is_tlbi(uint64_t);
+static void	arm64_vmm_load_run(struct vcpu *, int);
 static void	arm64_vmm_save_run(struct vcpu *);
 
 CTASSERT(sizeof(struct arm64_vmm_run) <= PAGE_SIZE);
+
+/*
+ * Mask the VHE host's hyp-virtual timer and remember its absolute deadline.
+ *
+ * This is deliberately done in C at the beginning of a recovery retry,
+ * while ordinary host interrupt dispatch is still installed.  A nested EL2
+ * context switch makes even arm64_vmm_load_run() and fpu_kernel_enter() long
+ * enough for the next randomized host tick to become pending.  Masking the
+ * source later in the assembly entry path cannot withdraw a level PPI which
+ * the outer GIC has already latched.
+ *
+ * The assembly entry gives the masked timer a temporary relative deadline
+ * immediately before ERET.  Its exit path restores the saved CVAL and CTL,
+ * so any host clock work which became due is delivered normally afterward.
+ */
+static int
+arm64_vmm_defer_host_timer(struct arm64_vmm_run *run)
+{
+	uint64_t ctl, cval;
+
+	__asm volatile("mrs %x0, s3_4_c14_c3_1" : "=r" (ctl));
+	if ((ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) != CNTV_CTL_ENABLE)
+		return (0);
+
+	__asm volatile("msr s3_4_c14_c3_1, %x0; isb" ::
+	    "r" (ctl | CNTV_CTL_IMASK) : "memory");
+	__asm volatile("mrs %x0, s3_4_c14_c3_2" : "=r" (cval));
+	run->avr_host_cnthv_ctl_el2 = ctl;
+	run->avr_host_cnthv_cval_el2 = cval;
+	return (1);
+}
+
+/*
+ * HCR_EL2.TTLB reports an EL1 TLBI as an EXCP_MSR trap.  TLBI belongs to the
+ * SYS instruction space (op0 == 1), where CRn == 8 uniquely identifies the
+ * translation-maintenance group.  vm_run() decodes the small EL1 operand
+ * families below and asks the entry assembly to replay the corresponding
+ * inner-shareable operation after selecting the vCPU's stage-2 context.
+ */
+static int
+arm64_vmm_is_tlbi(uint64_t esr)
+{
+	return ((esr & ESR_ELx_IL) != 0 && ISS_MSR_OP0(esr) == 1 &&
+	    ISS_MSR_OP1(esr) == 0 && ISS_MSR_CRn(esr) == 8 &&
+	    (ISS_MSR_CRm(esr) == 3 || ISS_MSR_CRm(esr) == 7));
+}
 
 int
 vmm_enabled(void)
@@ -151,12 +208,17 @@ arm64_vmm_intr_pending(struct vm_intr_params *vip)
 		ret = ENOENT;
 		goto out;
 	}
+	if (vip->vip_intr > VMM_INTR_PRIO_MAX) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	/*
-	 * HCR_EL2 has a virtual IRQ input but no interrupt identity.  Until a
-	 * userland GIC exists, preserve the VMM_IOC_INTR interface while treating
-	 * vip_intr as a line level: zero lowers VI and any non-zero value raises
-	 * it.  In particular, vip_intr is not an arm64 INTID here.
+	 * vip_intr is deliberately not an INTID.  Zero withdraws the signal;
+	 * values 1 through 255 assert it and encode GIC priority 0 through 254.
+	 * Userland owns interrupt identity and all distributor/redistributor
+	 * state.  The kernel uses the priority only to let the hardware virtual
+	 * CPU interface apply the guest's ICC_PMR_EL1 mask without an exit.
 	 *
 	 * vm_run() holds vc_lock across guest execution, so this ioctl cannot use
 	 * that lock: it must be able to interrupt a running vCPU.  The naturally
@@ -282,11 +344,17 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 
 	vcpu->vc_virt_mode = VMM_MODE_STAGE2;
 	vcpu->vc_state = VCPU_STATE_STOPPED;
+	vcpu->vc_lastcpu = NULL;
+	vcpu->vc_el12_dirty = 1;
+	vcpu->vc_exit_pending = 0;
+	vcpu->vc_entry_recovery = 0;
 	rw_init(&vcpu->vc_lock, "vcpu");
 	vcpu->vc_regs.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
 	vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	/* Group enable remains userland policy; hardware only supplies PMR gating. */
+	run->avr_ich_vmcr_el2 = ICH_VMCR_VENG1;
 	/* A recycled VMID must not inherit translations from an older VM. */
 	run->avr_flush_tlb = 1;
 	return (0);
@@ -295,6 +363,12 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 void
 vcpu_deinit(struct vcpu *vcpu)
 {
+	int i;
+
+	for (i = 0; i < MAXCPUS; i++) {
+		if (READ_ONCE(arm64_vmm_resident[i]) == vcpu)
+			WRITE_ONCE(arm64_vmm_resident[i], NULL);
+	}
 	if (vcpu->vc_control_va != 0) {
 		km_free((void *)vcpu->vc_control_va, PAGE_SIZE, &kv_page,
 		    &kp_zero);
@@ -313,6 +387,10 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 		return (EINVAL);
 
 	memcpy(&vcpu->vc_regs, vrs, sizeof(vcpu->vc_regs));
+	vcpu->vc_lastcpu = NULL;
+	vcpu->vc_el12_dirty = 1;
+	vcpu->vc_exit_pending = 0;
+	vcpu->vc_entry_recovery = 0;
 	if (vcpu->vc_regs.vrs_sctlr_el1 == 0)
 		vcpu->vc_regs.vrs_sctlr_el1 = SCTLR_RES1;
 	/* RESETCPU starts a fresh architectural context, including FP/AdvSIMD. */
@@ -321,6 +399,9 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	run->avr_fpcr = 0;
 	run->avr_fpsr = 0;
 	memset(run->avr_pauth, 0, sizeof(run->avr_pauth));
+	run->avr_ich_vmcr_el2 = ICH_VMCR_VENG1;
+	run->avr_ich_lr0_el2 = 0;
+	WRITE_ONCE(vcpu->vc_intr, VMM_INTR_PRIO_NONE);
 	return (0);
 }
 
@@ -350,9 +431,15 @@ vm_rwregs(struct vm_rwregs_params *vrwp, int dir)
 	else if (dir == 0)
 		memcpy(&vrwp->vrwp_regs, &vcpu->vc_regs,
 		    sizeof(vcpu->vc_regs));
-	else
+	else {
+		if (memcmp(&vcpu->vc_regs.vrs_elr_el1,
+		    &vrwp->vrwp_regs.vrs_elr_el1,
+		    offsetof(struct vcpu_reg_state, vrs_tpidr_el0) -
+		    offsetof(struct vcpu_reg_state, vrs_elr_el1)) != 0)
+			vcpu->vc_el12_dirty = 1;
 		memcpy(&vcpu->vc_regs, &vrwp->vrwp_regs,
 		    sizeof(vcpu->vc_regs));
+	}
 	rw_exit_write(&vcpu->vc_lock);
 out:
 	refcnt_rele_wake(&vm->vm_refcnt);
@@ -455,10 +542,11 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 }
 
 static void
-arm64_vmm_load_run(struct vcpu *vcpu)
+arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 {
 	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	struct vcpu_reg_state *vrs = &vcpu->vc_regs;
+	uint16_t intr;
 
 	memcpy(run->avr_gprs, vrs->vrs_gprs, sizeof(run->avr_gprs));
 	run->avr_sp = vrs->vrs_sp;
@@ -490,26 +578,47 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	 * authentication available.  IMO/FMO/AMO route physical asynchronous
 	 * exceptions to EL2 so a guest cannot mask the host's interrupt source.
 	 */
+	/*
+	 * A uniprocessor guest still migrates between physical host CPUs.  Force
+	 * its local cache/TLB maintenance to the inner-shareable domain and
+	 * upgrade its barriers accordingly; otherwise a translation-fault entry
+	 * left on one host CPU can reappear after the vCPU migrates back to it.
+	 * Trap guest stage-1 TLB maintenance so the entry path can replay it after
+	 * selecting this vCPU's HCR and VTTBR.  This is equivalent to native
+	 * execution on bare metal and, when vmm is itself nested, gives the outer
+	 * hypervisor a vEL2 operation associated with the correct shadow VMID.
+	 * Without that replay, a nested shadow can retain a negative EL0
+	 * translation across the guest's otherwise-correct VAE1IS.
+	 */
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
-	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO;
+	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO |
+	    HCR_FB | HCR_BSU_IS | HCR_TTLB;
 	/*
 	 * HCR_EL2.IMO makes Non-secure EL1 Group 1 ICC accesses select the
-	 * virtual CPU interface.  TALL1 returns those accesses to userland;
-	 * TC does the same for the common CPU-interface registers, including
-	 * ICC_PMR_EL1 and ICC_CTLR_EL1.  vmm(4) deliberately keeps no GIC
-	 * state: the VM_EXIT_EXCEPTION syndrome identifies the register and
-	 * VMM_IOC_WRITEREGS completes the instruction.
+	 * virtual CPU interface.  TALL1 returns Group 1 acknowledge, EOI, group
+	 * enable, and binary-point accesses to userland, where the GIC model owns
+	 * their state and interrupt identity.  TC remains clear so common
+	 * interface registers, most importantly ICC_PMR_EL1, stay resident in
+	 * ICH_VMCR_EL2 and do not require a userspace round trip on every spl
+	 * transition.
 	 */
-	run->avr_ich_hcr_el2 = ICH_HCR_TALL1 | ICH_HCR_TC;
+	run->avr_ich_hcr_el2 = ICH_HCR_EN | ICH_HCR_TALL1;
 	/*
-	 * VI presents the CPU's virtual IRQ input.  The CPU takes the exception
-	 * only when PSTATE.I permits it, and masks IRQs as part of exception
-	 * entry.  VI stays level-triggered until userland lowers it with a zero
-	 * VMM_IOC_INTR.  A future userland GIC will provide INTIDs, priority,
-	 * acknowledge, and EOI behavior; none of those are synthesized here.
+	 * One software List Register carries only the pending level and priority.
+	 * Its virtual INTID is a placeholder: TALL1 traps IAR before hardware can
+	 * expose or acknowledge that value, and userland supplies the real INTID.
+	 * The hardware nevertheless compares the LR priority with the guest's
+	 * resident PMR and asserts the virtual IRQ at the architecturally correct
+	 * mask level.  Updating vip_intr replaces or clears this single slot.
 	 */
-	if (READ_ONCE(vcpu->vc_intr) != 0)
-		run->avr_hcr_el2 |= HCR_VI;
+	if (load_intr) {
+		intr = READ_ONCE(vcpu->vc_intr);
+		run->avr_ich_lr0_el2 = 0;
+		if (intr != VMM_INTR_PRIO_NONE)
+			run->avr_ich_lr0_el2 = ICH_LR_PENDING | ICH_LR_GROUP1 |
+			    ((uint64_t)VMM_INTR_PRIO_DECODE(intr) <<
+			    ICH_LR_PRIORITY_SHIFT);
+	}
 	if (arm64_has_el2 == 2)
 		run->avr_hcr_el2 |= HCR_E2H;
 	run->avr_exit = ARM64_VMM_EXIT_NONE;
@@ -579,9 +688,12 @@ vm_run(struct vm_run_params *vrp)
 	struct vcpu *vcpu;
 	struct cpu_info *entry_ci;
 	paddr_t ipa, last_ipa = (paddr_t)-1;
-	uint64_t ec, entry_pc;
-	u_int irq_retries = 0, no_progress = 0, old, retries = 0;
-	int defer_timer, error = 0, fast_entry, ipi_disabled, save_async;
+	uint64_t ec;
+	u_int irq_retries = 0, old, retries = 0;
+	int defer_timer, entry_recovery, error = 0, fast_entry;
+	int ipi_disabled, recovery;
+	int recovery_s;
+	int save_async;
 
 	error = vm_find(vrp->vrp_vm_id, &vm);
 	if (error)
@@ -605,6 +717,37 @@ vm_run(struct vm_run_params *vrp)
 		error = EFAULT;
 		goto out_stopped;
 	}
+	/*
+	 * A VMM_IOC_RUN which exhausted its bounded asynchronous retries has
+	 * returned through the normal syscall and scheduler path.  The outer host
+	 * has therefore had an unconditional opportunity to acknowledge and EOI
+	 * the interrupt which prevented guest entry.  Consume its recovery token
+	 * by protecting the first entry of this new call before any nested EL2
+	 * state preparation can race the next clock deadline.
+	 */
+	entry_recovery = vcpu->vc_entry_recovery;
+	vcpu->vc_entry_recovery = 0;
+	/*
+	 * Like amd64, VMM_IOC_RUN is both the exit-report and exit-completion
+	 * interface.  If the previous run asked userland for help, consume the
+	 * register snapshot that userland has just copied back.  MMIO and trapped
+	 * system-register emulation can therefore advance PC and supply a result
+	 * without a separate VMM_IOC_WRITEREGS round trip.
+	 *
+	 * Do this only after an assisted exit.  The exit buffer is zeroed before
+	 * the first RUN and is also copied out for ordinary host-interrupt yields;
+	 * neither case represents guest state supplied by userland.
+	 */
+	if (vcpu->vc_exit_pending) {
+		if (memcmp(&vcpu->vc_regs.vrs_elr_el1,
+		    &vcpu->vc_exit.vrs.vrs_elr_el1,
+		    offsetof(struct vcpu_reg_state, vrs_tpidr_el0) -
+		    offsetof(struct vcpu_reg_state, vrs_elr_el1)) != 0)
+			vcpu->vc_el12_dirty = 1;
+		memcpy(&vcpu->vc_regs, &vcpu->vc_exit.vrs,
+		    sizeof(vcpu->vc_regs));
+		vcpu->vc_exit_pending = 0;
+	}
 
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	WRITE_ONCE(vcpu->vc_curcpu, curcpu());
@@ -621,9 +764,39 @@ vm_run(struct vm_run_params *vrp)
 	}
 	vrp->vrp_exit_reason = VM_EXIT_NONE;
 	for (;;) {
-		/* Materialize the saved vCPU state in the EL2 run page. */
-		arm64_vmm_load_run(vcpu);
-		entry_pc = run->avr_pc;
+		/*
+		 * Protect all of a recovery retry, not only the final assembly
+		 * transition.  Under nesting, the C-side state preparation also traps
+		 * enough EL2 state through the outer hypervisor to lose a short clock
+		 * deadline.  splraise() pins this thread while ordinary devices are
+		 * masked, and holding the IPI source keeps a reschedule request pending
+		 * until the bounded retry has returned.
+		 */
+		recovery = entry_recovery || irq_retries >= 1;
+		entry_ci = curcpu();
+		recovery_s = recovery ? splraise(IPL_CLOCK - 1) : IPL_NONE;
+		ipi_disabled = recovery && arm_intr_disable_ipi();
+		defer_timer = 0;
+		if (recovery && arm64_has_el2 == 2)
+			defer_timer = arm64_vmm_defer_host_timer(run);
+
+		/*
+		 * Materialize the saved vCPU state in the EL2 run page.  A same-call
+		 * retry retains the interrupt signal used by the failed entry.  A new
+		 * VMM_IOC_INTR may arrive while a nested hypervisor is still processing
+		 * that entry; loading it here would let a short-period guest timer win
+		 * every retry before the interrupted instruction can retire.  The
+		 * bounded retry delays such a signal only until this ioctl returns, when
+		 * the next VMM_IOC_RUN takes a fresh snapshot.
+		 */
+		arm64_vmm_load_run(vcpu, irq_retries == 0);
+		/*
+		 * A combined stage-1/stage-2 translation can remain in a physical
+		 * CPU's TLB after this vCPU last ran there.  Flush when the vCPU
+		 * migrates before reusing that VMID on its new CPU.
+		 */
+		if (vcpu->vc_lastcpu != NULL && vcpu->vc_lastcpu != curcpu())
+			run->avr_flush_tlb = 1;
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 		/*
 		 * A guest may use FP/AdvSIMD whenever its CPACR_EL1 permits it.
@@ -633,27 +806,31 @@ vm_run(struct vm_run_params *vrp)
 		 * its saved state instead of observing the guest's vector registers.
 		 */
 		fpu_kernel_enter();
-		fast_entry = (irq_retries != 0);
+		if (irq_retries != 0)
+			fast_entry = 1;
+		else if (arm64_has_el2 == 2 && !vcpu->vc_el12_dirty &&
+		    vcpu->vc_lastcpu == curcpu() &&
+		    READ_ONCE(arm64_vmm_resident[cpu_number()]) == vcpu)
+			fast_entry = 2;
+		else
+			fast_entry = 0;
 		save_async = (irq_retries == VMM_ASYNC_RETRIES);
-		defer_timer = (no_progress >= 2);
-		entry_ci = curcpu();
-		/*
-		 * On an MP host, scheduler IPIs can arrive faster than a nested VHE
-		 * entry completes.  Once repeated exits demonstrate starvation, ask
-		 * the interrupt controller to retain this CPU's IPI as pending during
-		 * the bounded recovery entry.  The host timer remains enabled and
-		 * therefore continues to bound guest execution.
-		 */
-		ipi_disabled = defer_timer && arm_intr_disable_ipi();
 		if (arm64_has_el2 == 2)
 			arm64_vmm_enter_vhe(vcpu->vc_control_va,
 			    fast_entry, save_async, defer_timer);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
+		if (arm64_has_el2 == 2) {
+			WRITE_ONCE(arm64_vmm_resident[cpu_number()], vcpu);
+			vcpu->vc_lastcpu = curcpu();
+			vcpu->vc_el12_dirty = 0;
+		}
 		if (ipi_disabled) {
 			KASSERT(entry_ci == curcpu());
 			arm_intr_enable_ipi();
 		}
+		if (recovery)
+			splx(recovery_s);
 		fpu_kernel_exit();
 		/*
 		 * EL2 has executed the requested TLBI even if a pending host IRQ
@@ -671,18 +848,42 @@ vm_run(struct vm_run_params *vrp)
 		 */
 		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
 		    run->avr_exit == ARM64_VMM_EXIT_FIQ) {
-			if (run->avr_pc == entry_pc) {
-				if (no_progress < 2)
-					no_progress++;
-			} else
-				no_progress = 0;
+			/*
+			 * AT S12E0R in the asynchronous vector checks the combined
+			 * translation for the interrupted EL0 PC while the guest's
+			 * translation regimes remain selected.  A fault is impossible
+			 * for the instruction the processor was executing: arm64 user
+			 * executable mappings are also readable.  It therefore exposes
+			 * a stale nested shadow left behind after an otherwise-correct
+			 * guest TLBI.
+			 *
+			 * Recover with the one operation which invalidates that outer
+			 * shadow.  First force the final asynchronous save/retry path;
+			 * it protects the potentially long nested VMALLS12E1IS from the
+			 * VHE host timer.  If the combined probe still faults afterward,
+			 * yield with a current EL12 snapshot and request a protected full
+			 * entry on the next ioctl.
+			 */
+			if ((vcpu->vc_regs.vrs_sctlr_el1 & SCTLR_M) != 0 &&
+			    (vcpu->vc_regs.vrs_pstate & PSR_M_MASK) == PSR_M_EL0t &&
+			    run->avr_async_pc == vcpu->vc_regs.vrs_pc &&
+			    (run->avr_async_par & PAR_F) != 0) {
+				run->avr_flush_tlb = VMM_TLBI_VMALLS12E1IS;
+				if (!save_async) {
+					irq_retries = VMM_ASYNC_RETRIES;
+					continue;
+				}
+				vcpu->vc_el12_dirty = 1;
+				vcpu->vc_entry_recovery = 1;
+				break;
+			}
 			/*
 			 * Retry a short, bounded sequence before returning to userland.
 			 * A physical timer can arrive while a nested hypervisor is still
 			 * restoring the guest context; if every such exit crosses the
 			 * ioctl boundary, the next tick can arrive before the guest
 			 * retires even one instruction.  Deferring the host virtual timer
-			 * after repeated no-progress exits prevents that timer from starving
+			 * after repeated asynchronous exits prevents that timer from starving
 			 * a nested guest during its comparatively expensive entry sequence.
 			 * The small bound still covers unrelated asynchronous work without
 			 * keeping the calling process in the kernel for an unbounded interval.
@@ -696,6 +897,8 @@ vm_run(struct vm_run_params *vrp)
 			KASSERT(entry_ci == curcpu());
 			if (irq_retries++ < VMM_ASYNC_RETRIES)
 				continue;
+			/* Protect the first entry after this syscall-level yield. */
+			vcpu->vc_entry_recovery = 1;
 			break;
 		}
 		/*
@@ -704,7 +907,6 @@ vm_run(struct vm_run_params *vrp)
 		 * even if an asynchronous retry preceded this exception.
 		 */
 		irq_retries = 0;
-		no_progress = 0;
 		/* SError is host-fatal until recovery semantics are designed. */
 		if (run->avr_exit == ARM64_VMM_EXIT_SERROR)
 			panic("%s: SError while running vcpu", __func__);
@@ -712,6 +914,42 @@ vm_run(struct vm_run_params *vrp)
 			panic("%s: unknown EL2 exit %llu", __func__,
 			    run->avr_exit);
 		ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
+
+		/*
+		 * Complete trapped guest translation maintenance in the kernel.  The
+		 * next entry performs the conservative combined invalidation after the
+		 * guest's stage-2 context is selected.  Advancing PC here makes the
+		 * operation atomic from userland's perspective and avoids exposing a
+		 * private maintenance exit through the vmm(4) API.
+		 */
+		if (ec == EXCP_MSR && arm64_vmm_is_tlbi(run->avr_esr_el2)) {
+			u_int reg = ISS_MSR_Rt(run->avr_esr_el2);
+
+			vcpu->vc_regs.vrs_pc += sizeof(uint32_t);
+			run->avr_tlbi_arg = reg == 31 ? 0 :
+			    vcpu->vc_regs.vrs_gprs[reg];
+			switch (ISS_MSR_OP2(run->avr_esr_el2)) {
+			case 0:	/* VMALLE1{,IS} */
+				run->avr_flush_tlb = VMM_TLBI_VMALLE1IS;
+				break;
+			case 1:	/* VAE1{,IS} */
+			case 5:	/* VALE1{,IS}; VAE is a safe superset. */
+				run->avr_flush_tlb = VMM_TLBI_VAE1IS;
+				break;
+			case 2:	/* ASIDE1{,IS} */
+				run->avr_flush_tlb = VMM_TLBI_ASIDE1IS;
+				break;
+			case 3:	/* VAAE1{,IS} */
+			case 7:	/* VAALE1{,IS}; VAAE is a safe superset. */
+				run->avr_flush_tlb = VMM_TLBI_VAAE1IS;
+				break;
+			default:
+				/* Unknown EL1 TLBI: retain correctness conservatively. */
+				run->avr_flush_tlb = VMM_TLBI_VMALLS12E1IS;
+				break;
+			}
+			continue;
+		}
 
 		if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L) {
 			/* HPFAR supplies IPA[47:12], while FAR supplies its offset. */
@@ -749,6 +987,9 @@ vm_run(struct vm_run_params *vrp)
 	if (copyout(&vcpu->vc_exit, vrp->vrp_exit,
 	    sizeof(vcpu->vc_exit)) != 0)
 		error = EFAULT;
+	else
+		vcpu->vc_exit_pending =
+		    vrp->vrp_exit_reason != VM_EXIT_NONE;
 out_stopped:
 	vcpu->vc_state = VCPU_STATE_STOPPED;
 out_unlock:

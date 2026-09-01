@@ -132,6 +132,12 @@ struct vm_intr_params {
 	uint16_t		vip_intr;
 };
 
+/* arm64 priority signal: zero lowers it; otherwise priority is value - 1. */
+#define VMM_INTR_PRIO_NONE	0
+#define VMM_INTR_PRIO_ENCODE(p)	((uint16_t)(p) + 1)
+#define VMM_INTR_PRIO_DECODE(v)	((uint8_t)((v) - 1))
+#define VMM_INTR_PRIO_MAX	VMM_INTR_PRIO_ENCODE(0xfe)
+
 #define VM_RWREGS_GPRS	0x1	/* read/write GPRs */
 #define VM_RWREGS_ALL	(VM_RWREGS_GPRS)
 
@@ -236,12 +242,19 @@ struct arm64_vmm_run {
 	uint64_t	avr_vttbr_el2;
 	uint64_t	avr_vtcr_el2;
 	uint64_t	avr_hcr_el2;
-	/* Traps guest ICC_*_EL1 accesses without enabling an in-kernel VGIC. */
 	uint64_t	avr_ich_hcr_el2;
+	/* Guest virtual CPU-interface state retained across exits. */
+	uint64_t	avr_ich_vmcr_el2;
+	/* One priority-bearing pending slot; userland retains the INTID. */
+	uint64_t	avr_ich_lr0_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
-	/* Invalidate this VMID's cached stage-2 translations before entry. */
+	/* Combined translation probe sampled while an EL0 instruction ran. */
+	uint64_t	avr_async_par;
+	uint64_t	avr_async_pc;
+	/* Pending EL2 translation-maintenance operation and optional operand. */
 	uint64_t	avr_flush_tlb;
+	uint64_t	avr_tlbi_arg;
 	uint64_t	avr_cntvoff_el2;
 	/* Trap guest physical-timer programming while leaving its counter readable. */
 	uint64_t	avr_cnthctl_el2;
@@ -278,8 +291,10 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_cnthv_cval_el2;
 	uint64_t	avr_host_vmpidr_el2;
 	uint64_t	avr_host_hcr_el2;
-	/* ICH_HCR_EL2 belongs to the host CPU and must survive each run. */
+	/* GIC virtual-interface registers are physical-CPU EL2 state. */
 	uint64_t	avr_host_ich_hcr_el2;
+	uint64_t	avr_host_ich_vmcr_el2;
+	uint64_t	avr_host_ich_lr0_el2;
 	/* Pointer-authentication keys are shared hardware state. */
 	uint64_t	avr_host_pauth[10] __aligned(16);
 };
@@ -294,8 +309,16 @@ struct vcpu {
 	uint8_t			vc_virt_mode;	/* [I] */
 	struct rwlock		vc_lock;
 	struct cpu_info		*vc_curcpu;	/* [a] */
+	/* Physical CPU containing the newest resident guest EL12 bank. */
+	struct cpu_info		*vc_lastcpu;	/* [v] */
+	/* The saved EL1 bank differs from the last resident VHE EL12 bank. */
+	uint8_t			vc_el12_dirty;	/* [v] */
 	/* Raw virtual IRQ line, written concurrently by VMM_IOC_INTR. */
 	uint16_t		vc_intr;	/* [a] */
+	/* The last exit snapshot awaits completion by the next VMM_IOC_RUN. */
+	uint8_t			vc_exit_pending;	/* [v] */
+	/* A bounded async yield requests an early protected entry next RUN. */
+	uint8_t			vc_entry_recovery;	/* [v] */
 	struct vm_exit		vc_exit;	/* [v] */
 	struct vcpu_reg_state	vc_regs;	/* [v] */
 	struct vcpu_inject_event vc_inject;	/* [v] */

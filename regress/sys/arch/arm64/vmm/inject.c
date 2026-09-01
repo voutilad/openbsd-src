@@ -39,8 +39,14 @@
 #define VECTOR_BASE	PAGE_SIZE
 #define IRQ_SPX_OFFSET	0x280
 
-/* The guest remains in EL1h until another process raises its virtual IRQ. */
+/*
+ * Enable all GIC priorities in the hardware-resident PMR, then remain in
+ * EL1h until another process raises its virtual IRQ.
+ */
 static const uint32_t guest_spin[] = {
+	0xd2801fe0,	/* mov x0, #0xff */
+	0xd5184600,	/* msr ICC_PMR_EL1, x0 */
+	0xd5033fdf,	/* isb */
 	0x14000000,	/* b . */
 };
 
@@ -137,7 +143,7 @@ main(void)
 		usleep(250000);
 		memset(&intr, 0, sizeof(intr));
 		intr.vip_vm_id = create.vcp_id;
-		intr.vip_intr = 1;
+		intr.vip_intr = VMM_INTR_PRIO_ENCODE(0);
 		if (ioctl(fd, VMM_IOC_INTR, &intr) == -1)
 			err(1, "VMM_IOC_INTR");
 		_exit(0);

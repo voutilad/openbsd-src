@@ -5,13 +5,14 @@ regress:
 	@echo SKIPPED
 .else
 
-PROGS =			vcpu preempt inject sysreg timer fp pauth
+PROGS =			vcpu preempt inject sysreg timer fp pauth tlbi
 SRCS_fp =		fp.c fp_asm.S
+SRCS_tlbi =		tlbi.c tlbi_asm.S
 WARNINGS =		yes
 
 REGRESS_TARGETS =	run-regress-vcpu run-regress-preempt run-regress-inject \
 			run-regress-sysreg run-regress-timer run-regress-fp \
-			run-regress-pauth
+			run-regress-pauth run-regress-tlbi
 run-regress-vcpu: vcpu
 	${SUDO} ./vcpu
 
@@ -32,6 +33,9 @@ run-regress-fp: fp
 
 run-regress-pauth: pauth
 	${SUDO} ./pauth
+
+run-regress-tlbi: tlbi
+	${SUDO} ./tlbi
 
 .if ! (make(clean) || make(cleandir) || make(obj))
 .include <bsd.own.mk>

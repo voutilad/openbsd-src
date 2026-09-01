@@ -58,11 +58,12 @@ END(arm64_vmm_enter_nvhe)
 /*
  * Enter a guest from a VHE host.  HCR_EL2.E2H remains set, so the host's EL2
  * stage-1 translation regime stays active and the run-page pointer is a
- * kernel virtual address in this mode.  x1 is non-zero only for the bounded
- * in-kernel retry after a physical interrupt.  x2 is non-zero when an
+ * kernel virtual address in this mode.  x1 selects a full entry (zero), an
+ * immediate same-call retry (one), or reuse of a resident EL12 bank with a
+ * fresh host snapshot (two).  x2 is non-zero when an
  * asynchronous exit must snapshot the resident EL12 bank before returning
- * to userland.  x3 requests a short host virtual-timer deferral after repeated
- * entries failed to retire a guest instruction.
+ * to userland.  A non-zero x3 says that C has masked and saved the VHE host's
+ * hyp-virtual timer for a short recovery entry.
  */
 ENTRY(arm64_vmm_enter_vhe)
 	sub	sp, sp, #112
@@ -91,20 +92,23 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x3, [x17, #AVR_DEFER_CNTHV]
 
 	/*
-	 * A fast retry may reuse the host snapshot made by the immediately
-	 * preceding entry.  The physical interrupt was handled only after that
-	 * snapshot had been restored, so returning to this call site leaves the
-	 * same architectural host state in place.  TPIDR_EL1 is curcpu() on
-	 * arm64; comparing it with the saved value also makes migration turn the
-	 * request into an ordinary full entry.  This check is done after masking
-	 * exceptions so the CPU cannot change between the comparison and the
-	 * guest entry sequence below.
+	 * Mode one may reuse the host snapshot made by the immediately preceding
+	 * entry in this call.  Mode two reuses only the resident guest EL12 bank;
+	 * it must snapshot the new syscall's stack and host state below.  TPIDR_EL1
+	 * is curcpu() on arm64.  A mismatch invalidates either reuse mode and turns
+	 * it into a full entry.  This check is done after masking exceptions so the
+	 * CPU cannot change between the comparison and the guest entry sequence.
 	 */
 	cbz	x15, .Lvhe_save_host
 	mrs	x0, tpidr_el1
 	ldr	x1, [x17, #AVR_HOST_TPIDR_EL1]
 	cmp	x0, x1
+	b.ne	.Lvhe_reuse_stale
+	cmp	x15, #1
 	b.eq	.Lvhe_host_saved
+	b	.Lvhe_save_host
+.Lvhe_reuse_stale:
+	mov	x15, xzr
 
 .Lvhe_save_host:
 	/* Save state which guest execution or the EL2 vectors overwrite. */
@@ -143,6 +147,10 @@ ENTRY(arm64_vmm_enter_vhe)
 	/* ICH_HCR_EL2 is per-CPU EL2 state, not part of the guest EL1 bank. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
+	mrs	x0, ICH_VMCR_EL2
+	str	x0, [x17, #AVR_HOST_ICH_VMCR_EL2]
+	mrs	x0, ICH_LR0_EL2
+	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
 	/*
 	 * API/APK let the guest execute pointer-authentication instructions and
 	 * write the key registers directly.  The keys are not banked, so save the
@@ -166,33 +174,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	stp	x0, x1, [x16, #64]
 
 .Lvhe_host_saved:
-	/*
-	 * A nested VHE transition can take longer than the outer host's next
-	 * randomized clock deadline.  C requests a deferral only after observing
-	 * two consecutive asynchronous exits at the same guest PC.  Preserve the
-	 * VHE host's hyp-virtual timer state so the original deadline can be
-	 * reinstated before host interrupt dispatch.  Mask the source before the
-	 * remaining (and potentially slow, when nested) guest-entry work.  Merely
-	 * moving CVAL near the end of the entry is too late: a level-triggered PPI
-	 * may already have become pending in the outer GIC by then.  Disabled or
-	 * already masked timers do not need help and must not be made active here.
-	 */
-	ldr	x0, [x17, #AVR_DEFER_CNTHV]
-	cbz	x0, .Lvhe_cnthv_saved
-	mrs	x0, s3_4_c14_c3_1	/* CNTHV_CTL_EL2 */
-	and	x1, x0, #(CNTV_CTL_ENABLE | CNTV_CTL_IMASK)
-	cmp	x1, #CNTV_CTL_ENABLE
-	b.eq	.Lvhe_cnthv_active
-	str	xzr, [x17, #AVR_DEFER_CNTHV]
-	b	.Lvhe_cnthv_saved
-.Lvhe_cnthv_active:
-	str	x0, [x17, #AVR_HOST_CNTHV_CTL_EL2]
-	orr	x1, x0, #CNTV_CTL_IMASK
-	msr	s3_4_c14_c3_1, x1	/* CNTHV_CTL_EL2 */
-	isb
-	mrs	x0, s3_4_c14_c3_2	/* CNTHV_CVAL_EL2 */
-	str	x0, [x17, #AVR_HOST_CNTHV_CVAL_EL2]
-.Lvhe_cnthv_saved:
 	/* All lower-EL AArch64 exceptions now enter the vmm vector slots. */
 	adrp	x0, hyp_vectors
 	add	x0, x0, :lo12:hyp_vectors
@@ -209,7 +190,16 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
 .Lvhe_stage2_ready:
-	/* Install ICC trap policy before HCR_EL2.IMO exposes the virtual view. */
+	/*
+	 * Install the guest's small hardware priority gate while the virtual CPU
+	 * interface is disabled.  LR0 is only a priority-bearing pending signal;
+	 * TALL1 ensures its placeholder INTID is never exposed to the guest.
+	 */
+	msr	ICH_HCR_EL2, xzr
+	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
+	msr	ICH_VMCR_EL2, x0
+	ldr	x0, [x17, #AVR_ICH_LR0_EL2]
+	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 
@@ -235,11 +225,35 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lvhe_tlb_done
 	/*
-	 * Invalidate only when C marked the stage-2 context dirty.  A global
-	 * TLBI on every host interrupt is prohibitively slow under nesting.
+	 * Value one is the full combined invalidation required after a stage-2
+	 * mapping change or stale nested-shadow detection.  Larger values replay
+	 * a trapped guest stage-1 TLBI after selecting its VTTBR.  Preserve the
+	 * operand so an outer hypervisor can associate VA and ASID with its shadow.
 	 */
 	dsb	ishst
+	cmp	x0, #2
+	b.eq	.Lvhe_tlbi_vmalle1
+	ldr	x1, [x17, #AVR_TLBI_ARG]
+	cmp	x0, #3
+	b.eq	.Lvhe_tlbi_vae1
+	cmp	x0, #4
+	b.eq	.Lvhe_tlbi_vaae1
+	cmp	x0, #5
+	b.eq	.Lvhe_tlbi_aside1
 	tlbi	vmalls12e1is
+	b	.Lvhe_tlbi_barrier
+.Lvhe_tlbi_vmalle1:
+	tlbi	vmalle1is
+	b	.Lvhe_tlbi_barrier
+.Lvhe_tlbi_vae1:
+	tlbi	vae1is, x1
+	b	.Lvhe_tlbi_barrier
+.Lvhe_tlbi_vaae1:
+	tlbi	vaae1is, x1
+	b	.Lvhe_tlbi_barrier
+.Lvhe_tlbi_aside1:
+	tlbi	aside1is, x1
+.Lvhe_tlbi_barrier:
 	dsb	ish
 	isb
 .Lvhe_tlb_done:
@@ -352,28 +366,21 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	apgakeyhi_el1, x1
 	isb
 	/*
-	 * Guarantee a 250ms execution window only when the saved deadline is
-	 * earlier.  CNTHV_CVAL_EL2 and CNTVCT_EL0 use the same virtual-count
-	 * domain.  Deriving the quantum from CNTFRQ_EL0 keeps this independent of
-	 * the platform counter frequency.  Unmasking is deliberately the last
-	 * timer operation before ERET, so the outer GIC cannot latch the timer PPI
-	 * during a slow nested entry.  The old timer state is restored on every
-	 * exit, so delayed OpenBSD clock work is dispatched immediately afterward.
+	 * Guarantee a 250ms execution window.  Use the timer-relative TVAL view:
+	 * when VHE itself is nested, deriving an absolute CNTHV_CVAL_EL2 from the
+	 * CNTVCT_EL0 alias can apply the wrong outer-hypervisor counter offset.
+	 * Deriving the relative quantum from CNTFRQ_EL0 remains independent of the
+	 * platform frequency.  Unmasking is deliberately the last timer operation
+	 * before ERET, so the outer GIC cannot latch the timer PPI during a slow
+	 * nested entry.  The old absolute deadline is restored on every exit, so
+	 * delayed OpenBSD clock work is dispatched immediately afterward.
 	 */
 	ldr	x0, [x17, #AVR_DEFER_CNTHV]
 	cbz	x0, .Lvhe_cnthv_deferred
-	mrs	x0, cntvct_el0
-	mrs	x1, cntfrq_el0
-	mov	x2, #4
-	udiv	x1, x1, x2
-	add	x0, x0, x1
-	ldr	x1, [x17, #AVR_HOST_CNTHV_CVAL_EL2]
-	cmp	x1, x0
-	b.ls	.Lvhe_extend_cnthv
-	str	xzr, [x17, #AVR_DEFER_CNTHV]
-	b	.Lvhe_unmask_cnthv
-.Lvhe_extend_cnthv:
-	msr	s3_4_c14_c3_2, x0	/* CNTHV_CVAL_EL2 */
+	mrs	x0, cntfrq_el0
+	mov	x1, #4
+	udiv	x0, x0, x1
+	msr	s3_4_c14_c3_0, x0	/* CNTHV_TVAL_EL2 */
 
 .Lvhe_unmask_cnthv:
 	ldr	x0, [x17, #AVR_HOST_CNTHV_CTL_EL2]
@@ -499,6 +506,10 @@ ENTRY_NP(vmm_hyp_sync)
 	/* Preserve the outer host's virtual-interface policy across nesting. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
+	mrs	x0, ICH_VMCR_EL2
+	str	x0, [x17, #AVR_HOST_ICH_VMCR_EL2]
+	mrs	x0, ICH_LR0_EL2
+	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
 	/* Save the nVHE host's five 128-bit pointer-authentication keys. */
 	add	x16, x17, #AVR_HOST_PAUTH
 	mrs	x0, apiakeylo_el1
@@ -522,14 +533,41 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
-	/* The following HCR write redirects guest ICC accesses to this policy. */
+	/* See the VHE entry path: LR0 carries priority, never interrupt identity. */
+	msr	ICH_HCR_EL2, xzr
+	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
+	msr	ICH_VMCR_EL2, x0
+	ldr	x0, [x17, #AVR_ICH_LR0_EL2]
+	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lnvhe_tlb_done
-	/* See the VHE path above: C requests this only after mapping changes. */
+	/* See the VHE path above for the operation encoding and ordering. */
 	dsb	ishst
+	cmp	x0, #2
+	b.eq	.Lnvhe_tlbi_vmalle1
+	ldr	x1, [x17, #AVR_TLBI_ARG]
+	cmp	x0, #3
+	b.eq	.Lnvhe_tlbi_vae1
+	cmp	x0, #4
+	b.eq	.Lnvhe_tlbi_vaae1
+	cmp	x0, #5
+	b.eq	.Lnvhe_tlbi_aside1
 	tlbi	vmalls12e1is
+	b	.Lnvhe_tlbi_barrier
+.Lnvhe_tlbi_vmalle1:
+	tlbi	vmalle1is
+	b	.Lnvhe_tlbi_barrier
+.Lnvhe_tlbi_vae1:
+	tlbi	vae1is, x1
+	b	.Lnvhe_tlbi_barrier
+.Lnvhe_tlbi_vaae1:
+	tlbi	vaae1is, x1
+	b	.Lnvhe_tlbi_barrier
+.Lnvhe_tlbi_aside1:
+	tlbi	aside1is, x1
+.Lnvhe_tlbi_barrier:
 	dsb	ish
 	isb
 .Lnvhe_tlb_done:
@@ -666,6 +704,26 @@ ENTRY_NP(vmm_hyp_irq)
 	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
+	/*
+	 * Probe only an interrupted EL0 PC.  AT S12E0R explicitly uses the
+	 * selected guest stage-1 and stage-2 regimes, unlike S1E0R under VHE.
+	 * Preserve the host PAR_EL1 around the probe: it is shared EL2 state,
+	 * while the guest sees its EL12 bank.
+	 */
+	str	xzr, [x17, #AVR_ASYNC_PAR]
+	mrs	x16, elr_el2
+	str	x16, [x17, #AVR_ASYNC_PC]
+	mrs	x16, spsr_el2
+	and	x16, x16, #0xf
+	cbnz	x16, 1f
+	mrs	x18, par_el1
+	ldr	x16, [x17, #AVR_ASYNC_PC]
+	at	s12e0r, x16
+	isb
+	mrs	x16, par_el1
+	str	x16, [x17, #AVR_ASYNC_PAR]
+	msr	par_el1, x18
+1:
 	mov	x16, #ARM64_VMM_EXIT_IRQ
 	str	x16, [x17, #AVR_EXIT]
 	b	.Lguest_exit
@@ -678,6 +736,21 @@ ENTRY_NP(vmm_hyp_fiq)
 	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
+	/* Keep the FIQ vector's translation check identical to the IRQ path. */
+	str	xzr, [x17, #AVR_ASYNC_PAR]
+	mrs	x16, elr_el2
+	str	x16, [x17, #AVR_ASYNC_PC]
+	mrs	x16, spsr_el2
+	and	x16, x16, #0xf
+	cbnz	x16, 1f
+	mrs	x18, par_el1
+	ldr	x16, [x17, #AVR_ASYNC_PC]
+	at	s12e0r, x16
+	isb
+	mrs	x16, par_el1
+	str	x16, [x17, #AVR_ASYNC_PAR]
+	msr	par_el1, x18
+1:
 	mov	x16, #ARM64_VMM_EXIT_FIQ
 	str	x16, [x17, #AVR_EXIT]
 	b	.Lguest_exit
@@ -864,6 +937,9 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_TPIDR_EL1]
 
 .Lsave_guest_done:
+	/* ICC_PMR_EL1 is resident in ICH_VMCR_EL2 while the guest runs. */
+	mrs	x0, ICH_VMCR_EL2
+	str	x0, [x18, #AVR_ICH_VMCR_EL2]
 	/* Capture the EL2 syndrome after all guest-visible EL1 state is safe. */
 	mrs	x0, esr_el2
 	str	x0, [x18, #AVR_ESR_EL2]
@@ -924,7 +1000,12 @@ END(vmm_hyp_serror)
 	 * regime.  No exit-side TLBI is needed: a later mapping change marks
 	 * AVR_FLUSH_TLB, and otherwise the same VMID/context remains valid.
 	 */
-	/* Stop trapping ICC accesses before returning to the nVHE host. */
+	/* Disable the guest interface, then put back the host's complete view. */
+	msr	ICH_HCR_EL2, xzr
+	ldr	x0, [x18, #AVR_HOST_ICH_VMCR_EL2]
+	msr	ICH_VMCR_EL2, x0
+	ldr	x0, [x18, #AVR_HOST_ICH_LR0_EL2]
+	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
@@ -988,7 +1069,12 @@ END(vmm_hyp_serror)
 	 * stayed live throughout the guest run.  The guest used EL12, so only
 	 * genuinely shared EL0/EL1 registers need explicit restoration here.
 	 */
-	/* Restore the VHE host's ICH policy just as its HCR policy is restored. */
+	/* Restore the VHE host's complete virtual CPU-interface context. */
+	msr	ICH_HCR_EL2, xzr
+	ldr	x0, [x18, #AVR_HOST_ICH_VMCR_EL2]
+	msr	ICH_VMCR_EL2, x0
+	ldr	x0, [x18, #AVR_HOST_ICH_LR0_EL2]
+	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]

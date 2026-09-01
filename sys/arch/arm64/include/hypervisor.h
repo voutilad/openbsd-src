@@ -59,6 +59,7 @@
 #define	HCR_VSE		0x0000000000000100
 #define	HCR_FB		0x0000000000000200
 #define	HCR_BSU_MASK	0x0000000000000c00
+#define	HCR_BSU_IS	0x0000000000000400
 #define	HCR_DC		0x0000000000001000
 #define	HCR_TWI		0x0000000000002000
 #define	HCR_TWE		0x0000000000004000
@@ -91,7 +92,17 @@
  * interface without committing vmm(4) to an in-kernel GIC model.
  */
 #define	ICH_HCR_EL2		s3_4_c12_c11_0
+#define	ICH_HCR_EN		(1UL << 0)
 #define	ICH_HCR_TC		(1UL << 10)
 #define	ICH_HCR_TALL1		(1UL << 12)
+
+#define	ICH_VMCR_EL2		s3_4_c12_c11_7
+#define	ICH_VMCR_VPMR_SHIFT	24
+#define	ICH_VMCR_VENG1		(1UL << 1)
+
+#define	ICH_LR0_EL2		s3_4_c12_c12_0
+#define	ICH_LR_PRIORITY_SHIFT	48
+#define	ICH_LR_GROUP1		(1UL << 60)
+#define	ICH_LR_PENDING		(1UL << 62)
 
 #endif

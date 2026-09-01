@@ -122,9 +122,14 @@ member	avr_vttbr_el2
 member	avr_vtcr_el2
 member	avr_hcr_el2
 member	avr_ich_hcr_el2
+member	avr_ich_vmcr_el2
+member	avr_ich_lr0_el2
 member	avr_mode
 member	avr_exit
+member	avr_async_par
+member	avr_async_pc
 member	avr_flush_tlb
+member	avr_tlbi_arg
 member	avr_cntvoff_el2
 member	avr_cnthctl_el2
 member	avr_vmpidr_el2
@@ -156,4 +161,6 @@ member	avr_host_cnthv_cval_el2
 member	avr_host_vmpidr_el2
 member	avr_host_hcr_el2
 member	avr_host_ich_hcr_el2
+member	avr_host_ich_vmcr_el2
+member	avr_host_ich_lr0_el2
 member	avr_host_pauth

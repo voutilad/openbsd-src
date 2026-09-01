@@ -39,17 +39,17 @@
 #define GUEST_RESULT	0x42
 
 /*
- * HCR_EL2.IMO redirects these ICC_PMR_EL1 accesses to the virtual CPU
- * interface.  ICH_HCR_EL2.TC must trap both instructions to vmm(4):
+ * HCR_EL2.IMO redirects these ICC_BPR1_EL1 accesses to the virtual CPU
+ * interface.  ICH_HCR_EL2.TALL1 must trap both instructions to vmm(4):
  *
- *     mrs x2, ICC_PMR_EL1
- *     msr ICC_PMR_EL1, x3
+ *     mrs x2, ICC_BPR1_EL1
+ *     msr ICC_BPR1_EL1, x3
  *     mov x0, #GUEST_RESULT
  *     hvc #0
  */
 static const uint32_t guest_code[] = {
-	0xd5384602,
-	0xd5184603,
+	0xd538cc62,
+	0xd518cc63,
 	0xd2800840,
 	0xd4000002,
 };
@@ -78,7 +78,7 @@ run_to_exit(int fd, struct vm_run_params *run)
 }
 
 static int
-check_pmr_exit(struct vm_run_params *run, uint64_t pc, u_int rt, int read)
+check_bpr1_exit(struct vm_run_params *run, uint64_t pc, u_int rt, int read)
 {
 	uint64_t esr = run->vrp_exit->vesr;
 
@@ -90,10 +90,10 @@ check_pmr_exit(struct vm_run_params *run, uint64_t pc, u_int rt, int read)
 	if (ESR_ELx_EXCEPTION(esr) != EXCP_MSR ||
 	    (esr & ESR_ELx_IL) == 0 ||
 	    ISS_MSR_OP0(esr) != 3 || ISS_MSR_OP1(esr) != 0 ||
-	    ISS_MSR_CRn(esr) != 4 || ISS_MSR_CRm(esr) != 6 ||
-	    ISS_MSR_OP2(esr) != 0 || ISS_MSR_Rt(esr) != rt ||
+	    ISS_MSR_CRn(esr) != 12 || ISS_MSR_CRm(esr) != 12 ||
+	    ISS_MSR_OP2(esr) != 3 || ISS_MSR_Rt(esr) != rt ||
 	    !!(esr & ISS_MSR_DIR) != read) {
-		warnx("unexpected ICC_PMR_EL1 syndrome 0x%llx", esr);
+		warnx("unexpected ICC_BPR1_EL1 syndrome 0x%llx", esr);
 		return (EINVAL);
 	}
 	if (run->vrp_exit->vrs.vrs_pc != pc) {
@@ -191,21 +191,21 @@ main(void)
 	alarm(5);
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to ICC_PMR_EL1 read");
+		warnc(error, "run to ICC_BPR1_EL1 read");
 		goto out_alarm;
 	}
-	if (check_pmr_exit(&run, 0, VCPU_REGS_X2, 1) != 0)
+	if (check_bpr1_exit(&run, 0, VCPU_REGS_X2, 1) != 0)
 		goto out_alarm;
 	if ((error = complete_sysreg(fd, &run, 1, READ_VALUE)) != 0) {
-		warnc(error, "complete ICC_PMR_EL1 read");
+		warnc(error, "complete ICC_BPR1_EL1 read");
 		goto out_alarm;
 	}
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to ICC_PMR_EL1 write");
+		warnc(error, "run to ICC_BPR1_EL1 write");
 		goto out_alarm;
 	}
-	if (check_pmr_exit(&run, sizeof(uint32_t), VCPU_REGS_X3, 0) != 0)
+	if (check_bpr1_exit(&run, sizeof(uint32_t), VCPU_REGS_X3, 0) != 0)
 		goto out_alarm;
 	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != READ_VALUE ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X3] != WRITE_VALUE) {
@@ -215,7 +215,7 @@ main(void)
 		goto out_alarm;
 	}
 	if ((error = complete_sysreg(fd, &run, 0, 0)) != 0) {
-		warnc(error, "complete ICC_PMR_EL1 write");
+		warnc(error, "complete ICC_BPR1_EL1 write");
 		goto out_alarm;
 	}
 
@@ -231,7 +231,7 @@ main(void)
 		goto out_alarm;
 	}
 
-	printf("trapped and completed ICC_PMR_EL1 read/write accesses\n");
+	printf("trapped and completed ICC_BPR1_EL1 read/write accesses\n");
 	ret = 0;
 
 out_alarm:
