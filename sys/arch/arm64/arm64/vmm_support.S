@@ -21,6 +21,7 @@
 
 	.arch armv8.1-a
 	.arch_extension fp
+	.arch_extension pauth
 
 #define VMM_HVC_ENTER	0x4f42
 
@@ -119,6 +120,27 @@ ENTRY(arm64_vmm_enter_vhe)
 	/* ICH_HCR_EL2 is per-CPU EL2 state, not part of the guest EL1 bank. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
+	/*
+	 * API/APK let the guest execute pointer-authentication instructions and
+	 * write the key registers directly.  The keys are not banked, so save the
+	 * host process's keys before HCR exposes them to the guest.
+	 */
+	add	x16, x17, #AVR_HOST_PAUTH
+	mrs	x0, apiakeylo_el1
+	mrs	x1, apiakeyhi_el1
+	stp	x0, x1, [x16, #0]
+	mrs	x0, apibkeylo_el1
+	mrs	x1, apibkeyhi_el1
+	stp	x0, x1, [x16, #16]
+	mrs	x0, apdakeylo_el1
+	mrs	x1, apdakeyhi_el1
+	stp	x0, x1, [x16, #32]
+	mrs	x0, apdbkeylo_el1
+	mrs	x1, apdbkeyhi_el1
+	stp	x0, x1, [x16, #48]
+	mrs	x0, apgakeylo_el1
+	mrs	x1, apgakeyhi_el1
+	stp	x0, x1, [x16, #64]
 
 	/* All lower-EL AArch64 exceptions now enter the vmm vector slots. */
 	adrp	x0, hyp_vectors
@@ -226,6 +248,24 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	fpcr, x0
 	ldr	x0, [x17, #AVR_FPSR]
 	msr	fpsr, x0
+	/* Install every guest pointer-authentication key before its first PAC. */
+	add	x16, x17, #AVR_PAUTH
+	ldp	x0, x1, [x16, #0]
+	msr	apiakeylo_el1, x0
+	msr	apiakeyhi_el1, x1
+	ldp	x0, x1, [x16, #16]
+	msr	apibkeylo_el1, x0
+	msr	apibkeyhi_el1, x1
+	ldp	x0, x1, [x16, #32]
+	msr	apdakeylo_el1, x0
+	msr	apdakeyhi_el1, x1
+	ldp	x0, x1, [x16, #48]
+	msr	apdbkeylo_el1, x0
+	msr	apdbkeyhi_el1, x1
+	ldp	x0, x1, [x16, #64]
+	msr	apgakeylo_el1, x0
+	msr	apgakeyhi_el1, x1
+	isb
 
 	/* x17 is the run-page pointer, so restore the guest's x17 last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
@@ -342,6 +382,23 @@ ENTRY_NP(vmm_hyp_sync)
 	/* Preserve the outer host's virtual-interface policy across nesting. */
 	mrs	x0, ICH_HCR_EL2
 	str	x0, [x17, #AVR_HOST_ICH_HCR_EL2]
+	/* Save the nVHE host's five 128-bit pointer-authentication keys. */
+	add	x16, x17, #AVR_HOST_PAUTH
+	mrs	x0, apiakeylo_el1
+	mrs	x1, apiakeyhi_el1
+	stp	x0, x1, [x16, #0]
+	mrs	x0, apibkeylo_el1
+	mrs	x1, apibkeyhi_el1
+	stp	x0, x1, [x16, #16]
+	mrs	x0, apdakeylo_el1
+	mrs	x1, apdakeyhi_el1
+	stp	x0, x1, [x16, #32]
+	mrs	x0, apdbkeylo_el1
+	mrs	x1, apdbkeyhi_el1
+	stp	x0, x1, [x16, #48]
+	mrs	x0, apgakeylo_el1
+	mrs	x1, apgakeyhi_el1
+	stp	x0, x1, [x16, #64]
 
 	/* Install the guest's stage-2 root, VMID, and address-space controls. */
 	ldr	x0, [x17, #AVR_VTTBR_EL2]
@@ -441,6 +498,23 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	fpcr, x0
 	ldr	x0, [x17, #AVR_FPSR]
 	msr	fpsr, x0
+	add	x16, x17, #AVR_PAUTH
+	ldp	x0, x1, [x16, #0]
+	msr	apiakeylo_el1, x0
+	msr	apiakeyhi_el1, x1
+	ldp	x0, x1, [x16, #16]
+	msr	apibkeylo_el1, x0
+	msr	apibkeyhi_el1, x1
+	ldp	x0, x1, [x16, #32]
+	msr	apdakeylo_el1, x0
+	msr	apdakeyhi_el1, x1
+	ldp	x0, x1, [x16, #48]
+	msr	apdbkeylo_el1, x0
+	msr	apdbkeyhi_el1, x1
+	ldp	x0, x1, [x16, #64]
+	msr	apgakeylo_el1, x0
+	msr	apgakeyhi_el1, x1
+	isb
 
 	/* x17 carries the run page until the guest's x17 is loaded last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
@@ -553,6 +627,24 @@ END(vmm_hyp_serror)
 	mrs	x0, fpsr
 	str	x0, [x18, #AVR_FPSR]
 
+	/* Save the guest keys while HCR_EL2 still selects guest execution. */
+	add	x16, x18, #AVR_PAUTH
+	mrs	x0, apiakeylo_el1
+	mrs	x1, apiakeyhi_el1
+	stp	x0, x1, [x16, #0]
+	mrs	x0, apibkeylo_el1
+	mrs	x1, apibkeyhi_el1
+	stp	x0, x1, [x16, #16]
+	mrs	x0, apdakeylo_el1
+	mrs	x1, apdakeyhi_el1
+	stp	x0, x1, [x16, #32]
+	mrs	x0, apdbkeylo_el1
+	mrs	x1, apdbkeyhi_el1
+	stp	x0, x1, [x16, #48]
+	mrs	x0, apgakeylo_el1
+	mrs	x1, apgakeyhi_el1
+	stp	x0, x1, [x16, #64]
+
 	/* Save state shared by both VHE and nVHE guest execution. */
 	mrs	x0, sp_el1
 	str	x0, [x18, #AVR_SP]
@@ -640,6 +732,29 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_FAR_EL2]
 	mrs	x0, hpfar_el2
 	str	x0, [x18, #AVR_HPFAR_EL2]
+
+	/*
+	 * Restore the host keys before any authenticated host return can execute.
+	 * The ISB makes the replacement effective before ERET reaches code built
+	 * with PAC return signing.
+	 */
+	add	x16, x18, #AVR_HOST_PAUTH
+	ldp	x0, x1, [x16, #0]
+	msr	apiakeylo_el1, x0
+	msr	apiakeyhi_el1, x1
+	ldp	x0, x1, [x16, #16]
+	msr	apibkeylo_el1, x0
+	msr	apibkeyhi_el1, x1
+	ldp	x0, x1, [x16, #32]
+	msr	apdakeylo_el1, x0
+	msr	apdakeyhi_el1, x1
+	ldp	x0, x1, [x16, #48]
+	msr	apdbkeylo_el1, x0
+	msr	apdbkeyhi_el1, x1
+	ldp	x0, x1, [x16, #64]
+	msr	apgakeylo_el1, x0
+	msr	apgakeyhi_el1, x1
+	isb
 
 	ldr	x1, [x18, #AVR_MODE]
 	cmp	x1, #ARM64_VMM_MODE_VHE

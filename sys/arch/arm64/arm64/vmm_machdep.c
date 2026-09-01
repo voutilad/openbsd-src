@@ -319,6 +319,7 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	memset(run->avr_fp, 0, sizeof(run->avr_fp));
 	run->avr_fpcr = 0;
 	run->avr_fpsr = 0;
+	memset(run->avr_pauth, 0, sizeof(run->avr_pauth));
 	return (0);
 }
 

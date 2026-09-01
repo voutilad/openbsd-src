@@ -114,6 +114,7 @@ member	avr_tpidr_el1
 member	avr_fp
 member	avr_fpcr
 member	avr_fpsr
+member	avr_pauth
 member	avr_esr_el2
 member	avr_far_el2
 member	avr_hpfar_el2
@@ -152,3 +153,4 @@ member	avr_host_cnthctl_el2
 member	avr_host_vmpidr_el2
 member	avr_host_hcr_el2
 member	avr_host_ich_hcr_el2
+member	avr_host_pauth

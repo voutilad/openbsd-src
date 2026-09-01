@@ -224,6 +224,9 @@ struct arm64_vmm_run {
 	uint64_t	avr_fpcr;
 	uint64_t	avr_fpsr;
 
+	/* APIA, APIB, APDA, APDB, and APGA, each stored low word first. */
+	uint64_t	avr_pauth[10] __aligned(16);
+
 	/* Syndrome state captured by the EL2 vectors on a guest exit. */
 	uint64_t	avr_esr_el2;
 	uint64_t	avr_far_el2;
@@ -272,6 +275,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_hcr_el2;
 	/* ICH_HCR_EL2 belongs to the host CPU and must survive each run. */
 	uint64_t	avr_host_ich_hcr_el2;
+	/* Pointer-authentication keys are shared hardware state. */
+	uint64_t	avr_host_pauth[10] __aligned(16);
 };
 
 struct vcpu {
