@@ -55,7 +55,6 @@ extern struct vmd_vm	*current_vm;
 extern int		 con_fd;
 
 static int	arm64_mmio_access(paddr_t, size_t, int, uint64_t *);
-static int	arm64_write_regs(struct vm_run_params *);
 static int	elf_to_gpa(uint64_t, int, uint64_t *);
 static int	load_payload_elf(gzFile, struct vmd_vm *,
 		    struct vcpu_reg_state *);
@@ -427,8 +426,6 @@ vcpu_deassert_irq(int fd, uint32_t vcpu_id, int vector)
 int
 vcpu_exit(struct vm_run_params *vrp)
 {
-	int error;
-
 	/*
 	 * A stage-2 MMIO fault arrives as an exception exit.  HVC and trapped
 	 * WFI/WFE are safe idle points: park the vCPU thread instead of
@@ -453,16 +450,15 @@ vcpu_exit(struct vm_run_params *vrp)
 		return (0);
 	case VM_EXIT_WFX:
 		/*
-		 * WFI/WFE is complete when vmm(4) reports it.  Leave the resume PC
-		 * after the instruction before parking, otherwise an IRQ taken while
-		 * waking the vCPU returns to the same WFI and immediately sleeps
+		 * WFI/WFE is complete when vmm(4) reports it.  Leave the returned
+		 * snapshot's resume PC after the instruction before parking.  The
+		 * next VMM_IOC_RUN consumes that snapshot, so an IRQ taken while
+		 * waking the vCPU cannot return to the same WFI and immediately sleep
 		 * again after the interrupt source has been cleared.
 		 */
 		vrp->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
-		error = arm64_write_regs(vrp);
-		if (error != 0)
-			return (error);
 		vcpu_halt(vrp->vrp_vcpu_id);
+		gicv3_wfi(vrp->vrp_vcpu_id);
 		return (0);
 	default:
 		log_warnx("unexpected arm64 vcpu exit reason 0x%x",
@@ -494,28 +490,6 @@ arm64_mmio_access(paddr_t gpa, size_t len, int write, uint64_t *data)
 	}
 	log_warnx("unhandled arm64 MMIO access at 0x%lx", gpa);
 	return (EFAULT);
-}
-
-static int
-arm64_write_regs(struct vm_run_params *vrp)
-{
-	struct vm_rwregs_params write;
-
-	/*
-	 * VMM_IOC_RUN returned a snapshot in vm_exit.  Userland changed that
-	 * snapshot to complete the trapped instruction, so explicitly copy the
-	 * new register state back before the next RUN.  A full mask keeps the
-	 * interface simple for this first implementation.
-	 */
-	memset(&write, 0, sizeof(write));
-	write.vrwp_vm_id = vrp->vrp_vm_id;
-	write.vrwp_vcpu_id = vrp->vrp_vcpu_id;
-	write.vrwp_mask = VM_RWREGS_ALL;
-	memcpy(&write.vrwp_regs, &vrp->vrp_exit->vrs,
-	    sizeof(write.vrwp_regs));
-	if (ioctl(env->vmd_vmm_fd, VMM_IOC_WRITEREGS, &write) == -1)
-		return (errno);
-	return (0);
 }
 
 static int
@@ -581,7 +555,7 @@ vcpu_exit_mmio(struct vm_run_params *vrp)
 		vrs->vrs_gprs[reg] = data & mask;
 	/* AArch64 instructions are fixed at four bytes; finish the access once. */
 	vrs->vrs_pc += sizeof(uint32_t);
-	return (arm64_write_regs(vrp));
+	return (0);
 }
 
 static int
@@ -617,7 +591,7 @@ vcpu_exit_sysreg(struct vm_run_params *vrp)
 	if (read && reg != 31)
 		vrs->vrs_gprs[reg] = data;
 	vrs->vrs_pc += sizeof(uint32_t);
-	return (arm64_write_regs(vrp));
+	return (0);
 }
 
 uint8_t
