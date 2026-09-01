@@ -106,8 +106,8 @@ exec 3>&-
 
 grep -q "arm64 vmd FDT + GICv3 SPI interrupt works" "${console}" ||
 	fail "guest did not take, acknowledge, and EOI the FDT-described GICv3 SPI"
-grep -q "arm64 vmd physical timer PPI works" "${console}" ||
-	fail "guest did not take and clear the FDT-described physical timer PPI"
+grep -q "arm64 vmd hardware virtual timer PPI works" "${console}" ||
+	fail "guest did not take and clear the FDT-described virtual timer PPI"
 grep -q "arm64 vmd PL011 TX interrupt works" "${console}" ||
 	fail "guest did not take the PL011 transmit-ready interrupt"
 grep -q "arm64 vmd PL011 RX interrupt works" "${console}" ||

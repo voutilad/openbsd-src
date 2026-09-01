@@ -401,6 +401,29 @@ arm64_vcpu_intr(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
 	return (0);
 }
 
+/*
+ * Publish the guest-programmed GIC policy for a kernel-originated
+ * architectural interrupt.  At present this is only the virtual timer PPI;
+ * the ioctl does not expose or alter the guest's timer registers.
+ */
+int
+arm64_vcpu_irqcfg(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
+    uint8_t priority, int enabled)
+{
+	struct vm_irqcfg_params viq;
+
+	memset(&viq, 0, sizeof(viq));
+	viq.viq_vm_id = vm_id;
+	viq.viq_vcpu_id = vcpu_id;
+	viq.viq_intr = intid;
+	viq.viq_priority = priority;
+	if (enabled)
+		viq.viq_flags = VMM_IRQCFG_ENABLED;
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_IRQCFG, &viq) == -1)
+		return (errno);
+	return (0);
+}
+
 int
 intr_pending(int vcpu_id)
 {
@@ -481,6 +504,7 @@ vcpu_exit(struct vm_run_params *vrp)
 		 */
 		vrp->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
 		vcpu_halt(vrp->vrp_vcpu_id);
+		arm64_timer_wfi(vrp->vrp_exit);
 		gicv3_wfi(vrp->vrp_vcpu_id);
 		return (0);
 	default:

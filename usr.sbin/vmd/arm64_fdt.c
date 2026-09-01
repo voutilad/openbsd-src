@@ -62,7 +62,6 @@ struct arm64_fdt_strings {
 	char	stdout_path[sizeof("stdout-path")];
 	char	status[sizeof("status")];
 	char	clock_frequency[sizeof("clock-frequency")];
-	char	physical_timer[sizeof("openbsd,physical-timer")];
 };
 
 static const struct arm64_fdt_strings arm64_fdt_strings = {
@@ -80,8 +79,7 @@ static const struct arm64_fdt_strings arm64_fdt_strings = {
 	.phandle = "phandle",
 	.stdout_path = "stdout-path",
 	.status = "status",
-	.clock_frequency = "clock-frequency",
-	.physical_timer = "openbsd,physical-timer"
+	.clock_frequency = "clock-frequency"
 };
 
 #define FDT_NAMEOFF(_member) \
@@ -213,7 +211,7 @@ fdt_prop_string(struct fdt_writer *w, uint32_t nameoff, const char *value)
 /*
  * Build the deliberately small platform description used by the first arm64
  * vmd backend.  There is one CPU, one contiguous RAM range, a GICv3 with one
- * Redistributor, a generic timer using the non-secure physical PPI, and one
+ * Redistributor, a generic timer using the architectural virtual PPI, and one
  * polling PL011.  The UART has no interrupts property, so the table does not
  * claim interrupt-driven serial I/O before it exists.
  *
@@ -298,7 +296,7 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_end_node(&w) == -1)
 		goto nospc;
 
-	/* GIC PPI 14 is architectural INTID 30, the non-secure physical timer. */
+	/* GIC PPI 11 is architectural INTID 27, the virtual timer. */
 	timer_interrupt[0] = htobe32(1);
 	timer_interrupt[1] = htobe32(ARM64_TIMER_INTID - 16);
 	timer_interrupt[2] = htobe32(4);
@@ -307,10 +305,9 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    "arm,armv8-timer") == -1 ||
 	    fdt_prop(&w, FDT_NAMEOFF(interrupts), timer_interrupt,
 	    sizeof(timer_interrupt)) == -1 ||
-	    fdt_prop_string(&w, FDT_NAMEOFF(interrupt_names), "phys") == -1 ||
+	    fdt_prop_string(&w, FDT_NAMEOFF(interrupt_names), "virt") == -1 ||
 	    fdt_prop_u32(&w, FDT_NAMEOFF(clock_frequency),
 	    ARM64_TIMER_FREQUENCY) == -1 ||
-	    fdt_prop(&w, FDT_NAMEOFF(physical_timer), NULL, 0) == -1 ||
 	    fdt_end_node(&w) == -1)
 		goto nospc;
 

@@ -34,29 +34,30 @@
 
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
-#define READ_VALUE	0x5
-#define TVAL_VALUE	0x1234
+#define TVAL_VALUE	24000000
 #define GUEST_RESULT	0x42
 
 /*
  * CNTKCTL_EL1 is ordinary guest context and must survive an exit.  EL1's
- * physical timer control registers, however, are trapped so the device model
- * in vmd(8) can schedule the interrupt advertised by the guest FDT:
+ * virtual timer has a private VHE EL02 bank.  Every access below must execute
+ * in hardware; the first public exit is the explicit HVC:
  *
  *     msr CNTKCTL_EL1, x3
  *     mrs x4, CNTKCTL_EL1
- *     mrs x6, CNTPCT_EL0
- *     mrs x2, CNTP_CTL_EL0
- *     msr CNTP_TVAL_EL0, x5
+ *     mrs x6, CNTVCT_EL0
+ *     msr CNTV_TVAL_EL0, x5
+ *     mrs x2, CNTV_CTL_EL0
+ *     mrs x7, CNTV_TVAL_EL0
  *     mov x0, #GUEST_RESULT
  *     hvc #0
  */
 static const uint32_t guest_code[] = {
 	0xd518e103,
 	0xd538e104,
-	0xd53be026,
-	0xd53be222,
-	0xd51be205,
+	0xd53be046,
+	0xd51be305,
+	0xd53be322,
+	0xd53be307,
 	0xd2800840,
 	0xd4000002,
 };
@@ -82,56 +83,6 @@ run_to_exit(int fd, struct vm_run_params *run)
 	} while (run->vrp_exit_reason == VM_EXIT_NONE && !alarm_fired);
 
 	return (alarm_fired ? ETIMEDOUT : 0);
-}
-
-static int
-check_timer_exit(struct vm_run_params *run, uint64_t pc, u_int op2,
-    u_int rt, int read)
-{
-	uint64_t esr = run->vrp_exit->vesr;
-
-	if (run->vrp_exit_reason != VM_EXIT_EXCEPTION) {
-		warnx("unexpected exit reason 0x%04x at pc 0x%llx",
-		    run->vrp_exit_reason, run->vrp_exit->vrs.vrs_pc);
-		return (EINVAL);
-	}
-	if (ESR_ELx_EXCEPTION(esr) != EXCP_MSR ||
-	    (esr & ESR_ELx_IL) == 0 ||
-	    ISS_MSR_OP0(esr) != 3 || ISS_MSR_OP1(esr) != 3 ||
-	    ISS_MSR_CRn(esr) != 14 || ISS_MSR_CRm(esr) != 2 ||
-	    ISS_MSR_OP2(esr) != op2 || ISS_MSR_Rt(esr) != rt ||
-	    !!(esr & ISS_MSR_DIR) != read) {
-		warnx("unexpected physical timer syndrome 0x%llx", esr);
-		return (EINVAL);
-	}
-	if (run->vrp_exit->vrs.vrs_pc != pc) {
-		warnx("unexpected trapped pc 0x%llx, wanted 0x%llx",
-		    run->vrp_exit->vrs.vrs_pc, pc);
-		return (EINVAL);
-	}
-	return (0);
-}
-
-static int
-complete_sysreg(int fd, struct vm_run_params *run, int read,
-    uint64_t value)
-{
-	struct vm_rwregs_params write;
-	u_int rt = ISS_MSR_Rt(run->vrp_exit->vesr);
-
-	if (read && rt != 31)
-		run->vrp_exit->vrs.vrs_gprs[rt] = value;
-	run->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
-
-	memset(&write, 0, sizeof(write));
-	write.vrwp_vm_id = run->vrp_vm_id;
-	write.vrwp_vcpu_id = run->vrp_vcpu_id;
-	write.vrwp_mask = VM_RWREGS_ALL;
-	memcpy(&write.vrwp_regs, &run->vrp_exit->vrs,
-	    sizeof(write.vrwp_regs));
-	if (ioctl(fd, VMM_IOC_WRITEREGS, &write) == -1)
-		return (errno);
-	return (0);
 }
 
 int
@@ -199,55 +150,25 @@ main(void)
 	alarm(5);
 
 	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to CNTP_CTL_EL0 read");
-		goto out_alarm;
-	}
-	if (check_timer_exit(&run, 3 * sizeof(uint32_t), 1,
-	    VCPU_REGS_X2, 1) != 0)
-		goto out_alarm;
-	if (vmexit.vrs.vrs_cntkctl_el1 != CNTKCTL_EL0VCTEN ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != CNTKCTL_EL0VCTEN ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X6] == 0) {
-		warnx("counter or CNTKCTL_EL1 was not preserved across entry");
-		goto out_alarm;
-	}
-	if ((error = complete_sysreg(fd, &run, 1, READ_VALUE)) != 0) {
-		warnc(error, "complete CNTP_CTL_EL0 read");
-		goto out_alarm;
-	}
-
-	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to CNTP_TVAL_EL0 write");
-		goto out_alarm;
-	}
-	if (check_timer_exit(&run, 4 * sizeof(uint32_t), 0,
-	    VCPU_REGS_X5, 0) != 0)
-		goto out_alarm;
-	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != READ_VALUE ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X5] != TVAL_VALUE) {
-		warnx("bad register values: x2=0x%llx x5=0x%llx",
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X2],
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X5]);
-		goto out_alarm;
-	}
-	if ((error = complete_sysreg(fd, &run, 0, 0)) != 0) {
-		warnc(error, "complete CNTP_TVAL_EL0 write");
-		goto out_alarm;
-	}
-
-	if ((error = run_to_exit(fd, &run)) != 0) {
-		warnc(error, "run to HVC");
+		warnc(error, "run through hardware virtual timer");
 		goto out_alarm;
 	}
 	if (run.vrp_exit_reason != VM_EXIT_HVC ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT) {
-		warnx("guest did not resume after timer completion: reason 0x%04x "
-		    "x0=0x%llx esr=0x%llx", run.vrp_exit_reason,
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0], vmexit.vesr);
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT ||
+	    vmexit.vrs.vrs_cntkctl_el1 != CNTKCTL_EL0VCTEN ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != CNTKCTL_EL0VCTEN ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X6] == 0 ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != 0 ||
+	    (int32_t)vmexit.vrs.vrs_gprs[VCPU_REGS_X7] <= 0) {
+		warnx("unexpected virtual timer result: reason 0x%04x x0=0x%llx "
+		    "ctl=0x%llx tval=%lld esr=0x%llx", run.vrp_exit_reason,
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X0],
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X2],
+		    vmexit.vrs.vrs_gprs[VCPU_REGS_X7], vmexit.vesr);
 		goto out_alarm;
 	}
 
-	printf("preserved CNTKCTL_EL1 and trapped physical timer accesses\n");
+	printf("executed CNTV timer accesses without a software exit\n");
 	ret = 0;
 
 out_alarm:

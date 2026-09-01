@@ -213,13 +213,17 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	hcr_el2, x0
 	isb
 	/*
-	 * The first arm64 machine model exposes only the physical timer.  Keep
-	 * the VHE guest's separate virtual timer output masked so its PPI cannot
-	 * remain asserted while the host rearms the hyp-virtual tick.  EL1TVT in
-	 * CNTHCTL_EL2 makes guest accesses trap instead of undoing this policy.
-	 * s3_5_c14_c3_1 is CNTV_CTL_EL02, the VHE alias for the guest bank.
+	 * Restore the VHE guest's architectural virtual-timer bank.  Disable and
+	 * mask its output while CVAL changes, then publish the guest's saved CTL
+	 * as the final operation.  s3_5_c14_c3_{1,2} are the VHE EL02 aliases for
+	 * CNTV_CTL_EL0 and CNTV_CVAL_EL0; guest accesses use the same bank and do
+	 * not trap.
 	 */
 	mov	x0, #CNTV_CTL_IMASK
+	msr	s3_5_c14_c3_1, x0
+	ldr	x0, [x17, #AVR_CNTV_CVAL_EL0]
+	msr	s3_5_c14_c3_2, x0
+	ldr	x0, [x17, #AVR_CNTV_CTL_EL0]
 	msr	s3_5_c14_c3_1, x0
 	isb
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
@@ -937,6 +941,25 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_TPIDR_EL1]
 
 .Lsave_guest_done:
+	/*
+	 * Snapshot the VHE guest's direct virtual timer before restoring host
+	 * controls.  Masking the now-inactive guest bank prevents its PPI from
+	 * leaking onto this physical CPU while the vCPU sleeps or migrates.  nVHE
+	 * retains the trapped software-timer fallback and has no EL02 bank to save.
+	 */
+	ldr	x0, [x18, #AVR_MODE]
+	cmp	x0, #ARM64_VMM_MODE_VHE
+	b.ne	.Lsave_guest_timer_done
+	mrs	x0, s3_5_c14_c3_1	/* CNTV_CTL_EL02 */
+	str	x0, [x18, #AVR_CNTV_CTL_EL0]
+	mrs	x0, s3_5_c14_c3_2	/* CNTV_CVAL_EL02 */
+	str	x0, [x18, #AVR_CNTV_CVAL_EL0]
+	mrs	x0, cntvct_el0
+	str	x0, [x18, #AVR_CNTVCT_EL0]
+	mov	x0, #CNTV_CTL_IMASK
+	msr	s3_5_c14_c3_1, x0	/* CNTV_CTL_EL02 */
+	isb
+.Lsave_guest_timer_done:
 	/*
 	 * VMCR retains PMR, BPR, and group enable.  LR0 may have moved from
 	 * pending to active or invalid when the guest executed IAR/EOIR, so capture

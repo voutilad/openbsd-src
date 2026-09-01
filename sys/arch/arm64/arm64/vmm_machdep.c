@@ -84,6 +84,7 @@ static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
+static int	arm64_vmm_irqcfg(struct vm_irqcfg_params *);
 static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
 static int	arm64_vmm_is_tlbi(uint64_t);
 static void	arm64_vmm_load_intr(struct vcpu *);
@@ -192,9 +193,50 @@ vmmioctl_machdep(dev_t dev, u_long cmd, caddr_t data, int flag,
 	case VMM_IOC_INTR:
 		return (arm64_vmm_intr_pending(
 		    (struct vm_intr_params *)data));
+	case VMM_IOC_IRQCFG:
+		return (arm64_vmm_irqcfg((struct vm_irqcfg_params *)data));
 	default:
 		return (ENOTTY);
 	}
+}
+
+/*
+ * Configure the GIC properties of an interrupt whose signal originates in
+ * vmm(4), rather than in a userland device model.  The architectural virtual
+ * timer is the first such source.  Its timer registers remain hardware state;
+ * this ioctl supplies only the Distributor/Redistributor policy which vmd
+ * learned from guest MMIO.
+ */
+static int
+arm64_vmm_irqcfg(struct vm_irqcfg_params *viq)
+{
+	struct vm *vm;
+	struct vcpu *vcpu;
+	int error, ret = 0;
+
+	error = vm_find(viq->viq_vm_id, &vm);
+	if (error != 0)
+		return (error);
+	vcpu = vm_find_vcpu(vm, viq->viq_vcpu_id);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
+	if (viq->viq_intr != VMM_ARM64_TIMER_INTID ||
+	    (viq->viq_flags & ~VMM_IRQCFG_ENABLED) != 0) {
+		ret = EINVAL;
+		goto out;
+	}
+
+	if ((viq->viq_flags & VMM_IRQCFG_ENABLED) != 0)
+		WRITE_ONCE(vcpu->vc_timer_intr, VMM_INTR_VALID |
+		    ((uint64_t)viq->viq_priority << VMM_INTR_PRIORITY_SHIFT) |
+		    viq->viq_intr);
+	else
+		WRITE_ONCE(vcpu->vc_timer_intr, 0);
+out:
+	refcnt_rele_wake(&vm->vm_refcnt);
+	return (ret);
 }
 
 static int
@@ -258,7 +300,7 @@ out:
 int
 pledge_ioctl_vmm_machdep(struct proc *p, long com)
 {
-	if (com == VMM_IOC_INTR)
+	if (com == VMM_IOC_INTR || com == VMM_IOC_IRQCFG)
 		return (0);
 	return (EPERM);
 }
@@ -367,6 +409,12 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	/* The guest establishes PMR, BPR, and Group-1 enable through ICC registers. */
 	run->avr_ich_vmcr_el2 = 0;
+	run->avr_cntv_ctl_el0 = 0;
+	run->avr_cntv_cval_el0 = 0;
+	run->avr_cntvct_el0 = 0;
+	vcpu->vc_timer_ctl = 0;
+	vcpu->vc_timer_deadline = 0;
+	WRITE_ONCE(vcpu->vc_timer_intr, 0);
 	/* A recycled VMID must not inherit translations from an older VM. */
 	run->avr_flush_tlb = 1;
 	return (0);
@@ -413,7 +461,13 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	memset(run->avr_pauth, 0, sizeof(run->avr_pauth));
 	run->avr_ich_vmcr_el2 = 0;
 	run->avr_ich_lr0_el2 = 0;
+	run->avr_cntv_ctl_el0 = 0;
+	run->avr_cntv_cval_el0 = 0;
+	run->avr_cntvct_el0 = 0;
 	WRITE_ONCE(vcpu->vc_intr, 0);
+	WRITE_ONCE(vcpu->vc_timer_intr, 0);
+	vcpu->vc_timer_ctl = 0;
+	vcpu->vc_timer_deadline = 0;
 	return (0);
 }
 
@@ -557,7 +611,7 @@ static void
 arm64_vmm_load_intr(struct vcpu *vcpu)
 {
 	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
-	uint64_t intid, lr, signal, state;
+	uint64_t intid, lr, now, signal, state, timer;
 
 	/*
 	 * LR0 is architectural state, not a level latch which can be overwritten
@@ -571,6 +625,28 @@ arm64_vmm_load_intr(struct vcpu *vcpu)
 	 * a phantom interrupt in the virtual CPU interface.
 	 */
 	signal = READ_ONCE(vcpu->vc_intr);
+	/*
+	 * A VHE guest programs CNTV_* directly.  Existing host clock exits sample
+	 * that bank often enough for a running vCPU; a trapped WFI is woken at the
+	 * exact deadline by vmd.  Compare in the host counter domain established
+	 * when the timer state was saved, then merge the timer PPI with the best
+	 * userland device using normal GIC priority and INTID tie breaking.
+	 */
+	timer = READ_ONCE(vcpu->vc_timer_intr);
+	if ((timer & VMM_INTR_VALID) != 0 &&
+	    (vcpu->vc_timer_ctl &
+	    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE) {
+		now = READ_SPECIALREG(cntvct_el0);
+		if ((int64_t)(now - vcpu->vc_timer_deadline) >= 0 &&
+		    ((signal & VMM_INTR_VALID) == 0 ||
+		    (timer & VMM_INTR_PRIORITY_MASK) <
+		    (signal & VMM_INTR_PRIORITY_MASK) ||
+		    ((timer & VMM_INTR_PRIORITY_MASK) ==
+		    (signal & VMM_INTR_PRIORITY_MASK) &&
+		    (timer & VMM_INTR_INTID_MASK) <
+		    (signal & VMM_INTR_INTID_MASK))))
+			signal = timer;
+	}
 	lr = run->avr_ich_lr0_el2;
 	state = lr & ICH_LR_STATE_MASK;
 	if (state == ICH_LR_ACTIVE ||
@@ -672,15 +748,14 @@ arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 	 */
 	run->avr_vmpidr_el2 = VMPIDR_RES1 | vcpu->vc_id;
 	/*
-	 * Keep the physical counter readable, but trap EL1 programming of the
-	 * physical timer.  Unlike trapping the virtual timer, this mechanism is
-	 * available without FEAT_ECV and therefore also works when vmm itself is
-	 * nested under a hypervisor that exposes only the baseline timer controls.
-	 * CNTHCTL_EL2 uses different enable bits in VHE and non-VHE modes.
+	 * A VHE host has a separate EL02 virtual-timer bank for its EL1 guest, so
+	 * leave EL1TVT clear and let CNTV_* execute directly.  An nVHE host shares
+	 * its virtual-timer bank with the guest; retain a trapped userland fallback
+	 * there until that host bank is safely context-switched.  Both modes leave
+	 * the physical timer inaccessible and keep the counter readable.
 	 */
 	if (arm64_has_el2 == 2)
-		run->avr_cnthctl_el2 =
-		    CNTHCTL_EL1PCTEN_VHE | CNTHCTL_EL1TVT;
+		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN_VHE;
 	else
 		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN | CNTHCTL_EL1TVT;
 }
@@ -690,6 +765,8 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 {
 	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	struct vcpu_reg_state *vrs = &vcpu->vc_regs;
+	int64_t delta;
+	uint64_t now;
 
 	memcpy(vrs->vrs_gprs, run->avr_gprs, sizeof(vrs->vrs_gprs));
 	vrs->vrs_sp = run->avr_sp;
@@ -717,6 +794,24 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 	vcpu->vc_exit.vesr = run->avr_esr_el2;
 	vcpu->vc_exit.vfar = run->avr_far_el2;
 	vcpu->vc_exit.vhpfar = run->avr_hpfar_el2;
+	vcpu->vc_exit.vet_cntv_ctl = run->avr_cntv_ctl_el0;
+	vcpu->vc_exit.vet_cntv_cval = run->avr_cntv_cval_el0;
+	vcpu->vc_exit.vet_cntvct = run->avr_cntvct_el0;
+	vcpu->vc_exit.vet_flags = 0;
+	if (arm64_has_el2 == 2) {
+		/*
+		 * Convert CVAL into the host counter domain using the relative
+		 * distance sampled by assembly at this exit.  An outer hypervisor's
+		 * counter offset therefore cancels, and the result survives migration
+		 * of the vCPU to another physical CPU.
+		 */
+		delta = (int64_t)(run->avr_cntv_cval_el0 -
+		    run->avr_cntvct_el0);
+		now = READ_SPECIALREG(cntvct_el0);
+		vcpu->vc_timer_deadline = delta > 0 ? now + delta : now;
+		vcpu->vc_timer_ctl = run->avr_cntv_ctl_el0;
+		vcpu->vc_exit.vet_flags = VMM_TIMER_F_HARDWARE;
+	}
 }
 
 int

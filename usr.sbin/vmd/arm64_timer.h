@@ -19,11 +19,14 @@
 #define _VMD_ARM64_TIMER_H_
 
 #define ARM64_TIMER_FREQUENCY	24000000U
-#define ARM64_TIMER_INTID	30
+#define ARM64_TIMER_INTID	27
+
+struct vm_exit;
 
 void	arm64_timer_init(uint32_t);
 void	arm64_timer_pause(void);
 void	arm64_timer_unpause(void);
+void	arm64_timer_wfi(const struct vm_exit *);
 int	arm64_timer_sysreg(uint64_t, int, uint64_t *);
 
 #endif /* _VMD_ARM64_TIMER_H_ */

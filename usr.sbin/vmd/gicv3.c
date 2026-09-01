@@ -27,6 +27,7 @@
 
 #include "vmd.h"
 #include "arm64_vm.h"
+#include "arm64_timer.h"
 #include "gicv3.h"
 
 /*
@@ -125,6 +126,9 @@ struct gicv3_dev {
 	uint8_t		 gd_igrpen1;
 	uint16_t	 gd_irq_intid;
 	uint8_t		 gd_irq_priority;
+	/* Last timer-PPI policy published for kernel-side expiry sampling. */
+	uint8_t		 gd_timer_enabled;
+	uint8_t		 gd_timer_priority;
 };
 
 static struct gicv3_dev gicv3 = {
@@ -138,6 +142,7 @@ static int	gicv3_is_edge_locked(int);
 static int	gicv3_priority_locked(paddr_t, int, size_t, int,
 		    uint64_t *);
 static int	gicv3_redist_locked(paddr_t, size_t, int, uint64_t *);
+static int	gicv3_timer_config_locked(void);
 static uint8_t	gicv3_running_priority_locked(void);
 static int	gicv3_sysreg_is(uint64_t, int, int, int, int, int);
 
@@ -174,7 +179,41 @@ gicv3_init(uint32_t vm_id)
 	gicv3.gd_igrpen1 = 0;
 	gicv3.gd_irq_intid = GICV3_SPURIOUS;
 	gicv3.gd_irq_priority = 0xff;
+	gicv3.gd_timer_enabled = 0;
+	gicv3.gd_timer_priority = 0xff;
 	mutex_unlock(&gicv3.gd_mtx);
+}
+
+/*
+ * vmd owns the timer PPI's Redistributor policy even though the timer signal
+ * itself comes from the vCPU's architectural CNTV bank.  Publish the small
+ * amount of policy needed to construct an LR when that hardware deadline has
+ * passed.  PMR, BPR, and group enable remain resident in the hardware CPU
+ * interface and need no copy here.
+ */
+static int
+gicv3_timer_config_locked(void)
+{
+	uint32_t bit;
+	int enabled, error, word;
+
+	word = gicv3_word(ARM64_TIMER_INTID);
+	bit = gicv3_bit(ARM64_TIMER_INTID);
+	enabled = (gicv3.gd_ctlr & GICD_CTLR_ENABLE_G1) != 0 &&
+	    (gicv3.gd_group[word] & bit) != 0 &&
+	    (gicv3.gd_enabled[word] & bit) != 0;
+	if (enabled == gicv3.gd_timer_enabled &&
+	    (!enabled || gicv3.gd_priority[ARM64_TIMER_INTID] ==
+	    gicv3.gd_timer_priority))
+		return (0);
+
+	error = arm64_vcpu_irqcfg(gicv3.gd_vm_id, 0, ARM64_TIMER_INTID,
+	    gicv3.gd_priority[ARM64_TIMER_INTID], enabled);
+	if (error != 0)
+		return (error);
+	gicv3.gd_timer_enabled = enabled;
+	gicv3.gd_timer_priority = gicv3.gd_priority[ARM64_TIMER_INTID];
+	return (0);
 }
 
 /*
@@ -247,6 +286,9 @@ gicv3_drive_locked(void)
 {
 	int error, intid;
 
+	error = gicv3_timer_config_locked();
+	if (error != 0)
+		return (error);
 	intid = gicv3_candidate_locked();
 	if (intid == gicv3.gd_irq_intid &&
 	    (intid == GICV3_SPURIOUS ||

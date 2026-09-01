@@ -71,7 +71,7 @@ typedef unsigned long usize;
 
 #define TEST_INTID	33
 #define TEST_INTID_BIT	(1U << (TEST_INTID - 32))
-#define TIMER_INTID	30
+#define TIMER_INTID	27
 #define TIMER_INTID_BIT	(1U << TIMER_INTID)
 #define TIMER_TICKS	240000
 #define GIC_SPURIOUS	1023
@@ -381,28 +381,28 @@ find_timer_intid(const void *fdt)
 	struct fdt_item item;
 	struct fdt_walk walk;
 	u32 intid = 0;
-	int compatible = 0, in_timer = 0, physical = 0, rv;
+	int compatible = 0, in_timer = 0, rv, virtual = 0;
 
 	if (blob_init(&walk, fdt) == -1)
 		return (-1);
 	while ((rv = walk_next(&walk, &item)) > 0) {
 		if (item.token == FDT_NODE_BEGIN && item.depth == 1) {
 			in_timer = string_equal(item.name, "timer");
-			compatible = physical = 0;
+			compatible = virtual = 0;
 			intid = 0;
 		} else if (item.token == FDT_PROPERTY && in_timer &&
 		    string_equal(item.name, "compatible")) {
 			compatible = property_has_string(item.data, item.len,
 			    "arm,armv8-timer");
 		} else if (item.token == FDT_PROPERTY && in_timer &&
-		    string_equal(item.name, "openbsd,physical-timer")) {
-			physical = 1;
+		    string_equal(item.name, "interrupt-names")) {
+			virtual = property_has_string(item.data, item.len, "virt");
 		} else if (item.token == FDT_PROPERTY && in_timer &&
 		    string_equal(item.name, "interrupts") && item.len >= 12 &&
 		    get_be32(item.data) == 1) {
 			intid = 16 + get_be32(item.data + 4);
 		} else if (item.token == FDT_NODE_END && item.depth == 1) {
-			if (in_timer && compatible && physical)
+			if (in_timer && compatible && virtual)
 				return (intid);
 			in_timer = 0;
 		}
@@ -457,15 +457,15 @@ write_icc_eoir1(u64 value)
 }
 
 static void
-write_cntp_ctl(u64 value)
+write_cntv_ctl(u64 value)
 {
-	__asm volatile("msr CNTP_CTL_EL0, %x0; isb" :: "r"(value) : "memory");
+	__asm volatile("msr CNTV_CTL_EL0, %x0; isb" :: "r"(value) : "memory");
 }
 
 static void
-write_cntp_tval(u64 value)
+write_cntv_tval(u64 value)
 {
-	__asm volatile("msr CNTP_TVAL_EL0, %x0; isb" :: "r"(value) : "memory");
+	__asm volatile("msr CNTV_TVAL_EL0, %x0; isb" :: "r"(value) : "memory");
 }
 
 void
@@ -478,7 +478,7 @@ guest_irq(void)
 	iar = read_icc_iar1();
 	guest_intid = iar & 0xffffff;
 	if (guest_intid == TIMER_INTID)
-		write_cntp_ctl(0);
+		write_cntv_ctl(0);
 	else if (guest_intid == TEST_INTID && guest_uart != (void *)0) {
 		/*
 		 * The first hardware-CPU-interface model has one LR but no
@@ -564,18 +564,18 @@ guest_main(const void *fdt)
 	else
 		uart_puts(uart, "arm64 vmd GICv3 returned wrong INTID\r\n");
 
-	/* Program the FDT-described physical timer as a level-triggered PPI. */
+	/* Program the FDT-described virtual timer as a level-triggered PPI. */
 	redist[GICR_IGROUPR0 / sizeof(u32)] |= TIMER_INTID_BIT;
 	rpriority[TIMER_INTID] = 0x80;
 	redist[GICR_ISENABLER0 / sizeof(u32)] = TIMER_INTID_BIT;
 	guest_intid = GIC_SPURIOUS;
-	write_cntp_ctl(0);
-	write_cntp_tval(TIMER_TICKS);
-	write_cntp_ctl(1);
+	write_cntv_ctl(0);
+	write_cntv_tval(TIMER_TICKS);
+	write_cntv_ctl(1);
 	while (guest_intid == GIC_SPURIOUS)
 		__asm volatile("wfi" ::: "memory");
 	if (guest_intid == TIMER_INTID)
-		uart_puts(uart, "arm64 vmd physical timer PPI works\r\n");
+		uart_puts(uart, "arm64 vmd hardware virtual timer PPI works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd timer returned wrong INTID\r\n");
 

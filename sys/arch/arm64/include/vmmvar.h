@@ -124,7 +124,14 @@ struct vm_exit {
 	uint64_t			vesr;
 	uint64_t			vfar;
 	uint64_t			vhpfar;
+	/* Architectural virtual-timer state sampled at this exit. */
+	uint64_t			vet_cntv_ctl;
+	uint64_t			vet_cntv_cval;
+	uint64_t			vet_cntvct;
+	uint32_t			vet_flags;
 };
+
+#define VMM_TIMER_F_HARDWARE	(1U << 0)
 
 struct vm_intr_params {
 	/* Input parameters to VMM_IOC_INTR */
@@ -138,6 +145,18 @@ struct vm_intr_params {
 #define VMM_INTR_MAX		1019
 #define VMM_INTR_LEVEL_LOW	0
 #define VMM_INTR_LEVEL_HIGH	1
+
+struct vm_irqcfg_params {
+	/* Input parameters to VMM_IOC_IRQCFG. */
+	uint32_t		viq_vm_id;
+	uint32_t		viq_vcpu_id;
+	uint16_t		viq_intr;
+	uint8_t			viq_priority;
+	uint8_t			viq_flags;
+};
+
+#define VMM_IRQCFG_ENABLED	(1U << 0)
+#define VMM_ARM64_TIMER_INTID	27
 
 #define VM_RWREGS_GPRS	0x1	/* read/write GPRs */
 #define VM_RWREGS_ALL	(VM_RWREGS_GPRS)
@@ -159,6 +178,7 @@ enum {
 
 /* IOCTL definitions */
 #define VMM_IOC_INTR _IOW('V', 6, struct vm_intr_params) /* Intr pending */
+#define VMM_IOC_IRQCFG _IOW('V', 12, struct vm_irqcfg_params)
 
 #ifdef _KERNEL
 
@@ -256,8 +276,12 @@ struct arm64_vmm_run {
 	/* Pending EL2 translation-maintenance operation and optional operand. */
 	uint64_t	avr_flush_tlb;
 	uint64_t	avr_tlbi_arg;
+	/* Guest virtual timer bank used directly by a VHE EL1 guest. */
+	uint64_t	avr_cntv_ctl_el0;
+	uint64_t	avr_cntv_cval_el0;
+	uint64_t	avr_cntvct_el0;
 	uint64_t	avr_cntvoff_el2;
-	/* Trap guest physical-timer programming while leaving its counter readable. */
+	/* Select direct virtual-timer access or the nVHE software fallback. */
 	uint64_t	avr_cnthctl_el2;
 	/* Affinity reported by a guest read of MPIDR_EL1. */
 	uint64_t	avr_vmpidr_el2;
@@ -316,6 +340,11 @@ struct vcpu {
 	uint8_t			vc_el12_dirty;	/* [v] */
 	/* Encoded virtual IRQ identity, priority, and line level. */
 	uint64_t		vc_intr;	/* [a] */
+	/* GIC configuration for the kernel-originated architectural timer PPI. */
+	uint64_t		vc_timer_intr;	/* [a] */
+	/* Host-counter deadline and guest CTL sampled on the most recent exit. */
+	uint64_t		vc_timer_deadline; /* [v] */
+	uint64_t		vc_timer_ctl;	/* [v] */
 	/* The last exit snapshot awaits completion by the next VMM_IOC_RUN. */
 	uint8_t			vc_exit_pending;	/* [v] */
 	/* A bounded async yield requests an early protected entry next RUN. */

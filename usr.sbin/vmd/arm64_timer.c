@@ -32,10 +32,6 @@
 #include "arm64_timer.h"
 #include "gicv3.h"
 
-#define CNTP_CTL_ENABLE		(1U << 0)
-#define CNTP_CTL_IMASK		(1U << 1)
-#define CNTP_CTL_ISTATUS	(1U << 2)
-
 struct arm64_timer_dev {
 	pthread_mutex_t	 td_mtx;
 	uint32_t	 td_vm_id;
@@ -45,6 +41,7 @@ struct arm64_timer_dev {
 	int		 td_expired;
 	int		 td_irq_line;
 	int		 td_paused;
+	int		 td_hardware;
 	struct event	 td_event;
 	struct vm_dev_pipe td_pipe;
 };
@@ -62,7 +59,7 @@ static int
 arm64_timer_is_sysreg(uint64_t esr, int op2)
 {
 	return (ISS_MSR_OP0(esr) == 3 && ISS_MSR_OP1(esr) == 3 &&
-	    ISS_MSR_CRn(esr) == 14 && ISS_MSR_CRm(esr) == 2 &&
+	    ISS_MSR_CRn(esr) == 14 && ISS_MSR_CRm(esr) == 3 &&
 	    ISS_MSR_OP2(esr) == op2);
 }
 
@@ -72,14 +69,14 @@ arm64_timer_refresh_locked(void)
 	struct timespec now;
 	int irq_line;
 
-	if ((arm64_timer.td_ctl & CNTP_CTL_ENABLE) != 0 &&
+	if ((arm64_timer.td_ctl & CNTV_CTL_ENABLE) != 0 &&
 	    arm64_timer.td_deadline_valid && !arm64_timer.td_expired) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (timespeccmp(&now, &arm64_timer.td_deadline, >=))
 			arm64_timer.td_expired = 1;
 	}
-	irq_line = (arm64_timer.td_ctl & CNTP_CTL_ENABLE) != 0 &&
-	    (arm64_timer.td_ctl & CNTP_CTL_IMASK) == 0 &&
+	irq_line = (arm64_timer.td_ctl & CNTV_CTL_ENABLE) != 0 &&
+	    (arm64_timer.td_ctl & CNTV_CTL_IMASK) == 0 &&
 	    arm64_timer.td_expired;
 	if (irq_line == arm64_timer.td_irq_line)
 		return (0);
@@ -118,8 +115,11 @@ arm64_timer_schedule_locked(void)
 
 	evtimer_del(&arm64_timer.td_event);
 	if (arm64_timer.td_paused ||
-	    (arm64_timer.td_ctl & CNTP_CTL_ENABLE) == 0 ||
+	    (arm64_timer.td_ctl & CNTV_CTL_ENABLE) == 0 ||
 	    !arm64_timer.td_deadline_valid || arm64_timer.td_expired)
+		return;
+	if (arm64_timer.td_hardware &&
+	    (arm64_timer.td_ctl & CNTV_CTL_IMASK) != 0)
 		return;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	if (timespeccmp(&now, &arm64_timer.td_deadline, >=)) {
@@ -139,14 +139,35 @@ arm64_timer_schedule_locked(void)
 static void
 arm64_timer_fire(int fd, short event, void *arg)
 {
+	struct timespec now;
+	int wake = 0;
+
 	(void)fd;
 	(void)event;
 	(void)arg;
 
 	mutex_lock(&arm64_timer.td_mtx);
-	if (arm64_timer_refresh_locked() != 0)
+	if (arm64_timer.td_hardware) {
+		if (!arm64_timer.td_paused &&
+		    arm64_timer.td_deadline_valid &&
+		    !arm64_timer.td_expired) {
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (timespeccmp(&now, &arm64_timer.td_deadline, >=))
+				arm64_timer.td_expired = 1;
+			else
+				arm64_timer_schedule_locked();
+		}
+		wake = !arm64_timer.td_paused &&
+		    (arm64_timer.td_ctl &
+		    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE &&
+		    arm64_timer.td_expired;
+	} else if (arm64_timer_refresh_locked() != 0)
 		log_warnx("failed to assert arm64 timer interrupt");
 	mutex_unlock(&arm64_timer.td_mtx);
+	if (wake) {
+		vcpu_unhalt(0);
+		vcpu_signal_run(0);
+	}
 }
 
 static void
@@ -201,6 +222,67 @@ arm64_timer_unpause(void)
 	mutex_unlock(&arm64_timer.td_mtx);
 }
 
+/*
+ * A VHE vCPU executes CNTV_CTL_EL0 and CNTV_CVAL_EL0 in its EL02 hardware
+ * bank.  When WFI returns control to vmd, use the exit snapshot only to arm a
+ * host wakeup for the sleeping vCPU.  The event does not synthesize timer
+ * register values or assert a userland GIC line: on the following RUN,
+ * vmm(4) observes the same hardware deadline and installs PPI 27 in an LR.
+ */
+void
+arm64_timer_wfi(const struct vm_exit *exit)
+{
+	struct timespec now;
+	int64_t ticks;
+	uint64_t nsec;
+	int wake = 0;
+
+	if ((exit->vet_flags & VMM_TIMER_F_HARDWARE) == 0)
+		return;
+
+	mutex_lock(&arm64_timer.td_mtx);
+	arm64_timer.td_hardware = 1;
+	if (arm64_timer.td_irq_line) {
+		/* Withdraw a line left by the nVHE software fallback, if any. */
+		if (gicv3_set_irq(arm64_timer.td_vm_id, 0,
+		    ARM64_TIMER_INTID, 0) != 0)
+			log_warnx("failed to lower fallback arm64 timer interrupt");
+		arm64_timer.td_irq_line = 0;
+	}
+	arm64_timer.td_ctl = exit->vet_cntv_ctl &
+	    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
+	arm64_timer.td_deadline_valid =
+	    (arm64_timer.td_ctl & CNTV_CTL_ENABLE) != 0;
+	arm64_timer.td_expired = 0;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	arm64_timer.td_deadline = now;
+	ticks = (int64_t)(exit->vet_cntv_cval - exit->vet_cntvct);
+	if (arm64_timer.td_deadline_valid && ticks <= 0)
+		arm64_timer.td_expired = 1;
+	else if (arm64_timer.td_deadline_valid) {
+		arm64_timer.td_deadline.tv_sec +=
+		    ticks / ARM64_TIMER_FREQUENCY;
+		nsec = (uint64_t)(ticks % ARM64_TIMER_FREQUENCY) *
+		    1000000000ULL / ARM64_TIMER_FREQUENCY;
+		arm64_timer.td_deadline.tv_nsec += nsec;
+		if (arm64_timer.td_deadline.tv_nsec >= 1000000000L) {
+			arm64_timer.td_deadline.tv_sec++;
+			arm64_timer.td_deadline.tv_nsec -= 1000000000L;
+		}
+	}
+	wake = !arm64_timer.td_paused && arm64_timer.td_expired &&
+	    (arm64_timer.td_ctl &
+	    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE;
+	mutex_unlock(&arm64_timer.td_mtx);
+
+	/* libevent ownership stays on the event thread. */
+	vm_pipe_send(&arm64_timer.td_pipe, ARM64_TIMER_RESCHEDULE);
+	if (wake) {
+		vcpu_unhalt(0);
+		vcpu_signal_run(0);
+	}
+}
+
 int
 arm64_timer_sysreg(uint64_t esr, int write, uint64_t *data)
 {
@@ -216,7 +298,8 @@ arm64_timer_sysreg(uint64_t esr, int write, uint64_t *data)
 		return (ENOENT);
 
 	mutex_lock(&arm64_timer.td_mtx);
-	if (arm64_timer_is_sysreg(esr, 0)) { /* CNTP_TVAL_EL0 */
+	arm64_timer.td_hardware = 0;
+	if (arm64_timer_is_sysreg(esr, 0)) { /* CNTV_TVAL_EL0 */
 		if (write) {
 			tval = (uint32_t)*data;
 			clock_gettime(CLOCK_MONOTONIC, &now);
@@ -239,17 +322,17 @@ arm64_timer_sysreg(uint64_t esr, int write, uint64_t *data)
 			reschedule = 1;
 		} else
 			*data = (uint32_t)arm64_timer_tval_locked();
-	} else { /* CNTP_CTL_EL0 */
+	} else { /* CNTV_CTL_EL0 */
 		if (write) {
 			arm64_timer.td_ctl = *data &
-			    (CNTP_CTL_ENABLE | CNTP_CTL_IMASK);
+			    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
 			reschedule = 1;
 		} else {
 			error = arm64_timer_refresh_locked();
 			*data = arm64_timer.td_ctl;
-			if ((arm64_timer.td_ctl & CNTP_CTL_ENABLE) != 0 &&
+			if ((arm64_timer.td_ctl & CNTV_CTL_ENABLE) != 0 &&
 			    arm64_timer.td_expired)
-				*data |= CNTP_CTL_ISTATUS;
+				*data |= CNTV_CTL_ISTATUS;
 		}
 	}
 	if (write)
