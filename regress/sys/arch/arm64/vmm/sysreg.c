@@ -34,7 +34,7 @@
 
 #define VMM_NODE	"/dev/vmm"
 #define GUEST_MEM_SIZE	(4 * PAGE_SIZE)
-#define BPR1_VALUE	2
+#define BPR1_VALUE	4
 #define GUEST_RESULT	0x42
 
 /*

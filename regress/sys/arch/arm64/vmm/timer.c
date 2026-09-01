@@ -158,7 +158,8 @@ main(void)
 	    vmexit.vrs.vrs_cntkctl_el1 != CNTKCTL_EL0VCTEN ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != CNTKCTL_EL0VCTEN ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X6] == 0 ||
-	    vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != 0 ||
+	    (vmexit.vrs.vrs_gprs[VCPU_REGS_X2] &
+	    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) != 0 ||
 	    (int32_t)vmexit.vrs.vrs_gprs[VCPU_REGS_X7] <= 0) {
 		warnx("unexpected virtual timer result: reason 0x%04x x0=0x%llx "
 		    "ctl=0x%llx tval=%lld esr=0x%llx", run.vrp_exit_reason,
