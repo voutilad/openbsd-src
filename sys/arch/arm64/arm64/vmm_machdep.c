@@ -438,6 +438,8 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 		if (!pmap_extract(p->p_vmspace->vm_map.pmap,
 		    hva, &hpa))
 			return (EFAULT);
+		/* pmap_enter() cannot wait while holding the pmap lock. */
+		pmap_populate(vcpu->vc_parent->vm_pmap, pa);
 		error = pmap_enter(vcpu->vc_parent->vm_pmap,
 		    pa, hpa,
 		    PROT_READ | PROT_WRITE | PROT_EXEC,
