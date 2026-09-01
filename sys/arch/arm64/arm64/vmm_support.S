@@ -58,7 +58,11 @@ END(arm64_vmm_enter_nvhe)
 /*
  * Enter a guest from a VHE host.  HCR_EL2.E2H remains set, so the host's EL2
  * stage-1 translation regime stays active and the run-page pointer is a
- * kernel virtual address in this mode.
+ * kernel virtual address in this mode.  x1 is non-zero only for the bounded
+ * in-kernel retry after a physical interrupt.  x2 is non-zero when an
+ * asynchronous exit must snapshot the resident EL12 bank before returning
+ * to userland.  x3 requests a short host virtual-timer deferral after repeated
+ * entries failed to retire a guest instruction.
  */
 ENTRY(arm64_vmm_enter_vhe)
 	sub	sp, sp, #112
@@ -75,13 +79,34 @@ ENTRY(arm64_vmm_enter_vhe)
 	 * partially installed.  The original DAIF value is saved in the host
 	 * PSTATE below and restored by the final ERET.
 	 */
+	mov	x14, x2
 	mrs	x2, daif
 	msr	daifset, #0xf
+	mov	x15, x1
 	mov	x17, x0
 	msr	tpidr_el2, x17
 	mov	x0, #ARM64_VMM_MODE_VHE
 	str	x0, [x17, #AVR_MODE]
+	str	x14, [x17, #AVR_HOST_ESR_EL1]
+	str	x3, [x17, #AVR_DEFER_CNTHV]
 
+	/*
+	 * A fast retry may reuse the host snapshot made by the immediately
+	 * preceding entry.  The physical interrupt was handled only after that
+	 * snapshot had been restored, so returning to this call site leaves the
+	 * same architectural host state in place.  TPIDR_EL1 is curcpu() on
+	 * arm64; comparing it with the saved value also makes migration turn the
+	 * request into an ordinary full entry.  This check is done after masking
+	 * exceptions so the CPU cannot change between the comparison and the
+	 * guest entry sequence below.
+	 */
+	cbz	x15, .Lvhe_save_host
+	mrs	x0, tpidr_el1
+	ldr	x1, [x17, #AVR_HOST_TPIDR_EL1]
+	cmp	x0, x1
+	b.eq	.Lvhe_host_saved
+
+.Lvhe_save_host:
 	/* Save state which guest execution or the EL2 vectors overwrite. */
 	mov	x0, sp
 	str	x0, [x17, #AVR_HOST_SP]
@@ -109,8 +134,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_TPIDRRO_EL0]
 	mrs	x0, tpidr_el1
 	str	x0, [x17, #AVR_HOST_TPIDR_EL1]
-	mrs	x0, cntvoff_el2
-	str	x0, [x17, #AVR_HOST_CNTVOFF_EL2]
 	mrs	x0, cnthctl_el2
 	str	x0, [x17, #AVR_HOST_CNTHCTL_EL2]
 	mrs	x0, vmpidr_el2
@@ -142,14 +165,50 @@ ENTRY(arm64_vmm_enter_vhe)
 	mrs	x1, apgakeyhi_el1
 	stp	x0, x1, [x16, #64]
 
+.Lvhe_host_saved:
+	/*
+	 * A nested VHE transition can take longer than the outer host's next
+	 * randomized clock deadline.  C requests a deferral only after observing
+	 * two consecutive asynchronous exits at the same guest PC.  Preserve the
+	 * VHE host's hyp-virtual timer state so the original deadline can be
+	 * reinstated before host interrupt dispatch.  Mask the source before the
+	 * remaining (and potentially slow, when nested) guest-entry work.  Merely
+	 * moving CVAL near the end of the entry is too late: a level-triggered PPI
+	 * may already have become pending in the outer GIC by then.  Disabled or
+	 * already masked timers do not need help and must not be made active here.
+	 */
+	ldr	x0, [x17, #AVR_DEFER_CNTHV]
+	cbz	x0, .Lvhe_cnthv_saved
+	mrs	x0, s3_4_c14_c3_1	/* CNTHV_CTL_EL2 */
+	and	x1, x0, #(CNTV_CTL_ENABLE | CNTV_CTL_IMASK)
+	cmp	x1, #CNTV_CTL_ENABLE
+	b.eq	.Lvhe_cnthv_active
+	str	xzr, [x17, #AVR_DEFER_CNTHV]
+	b	.Lvhe_cnthv_saved
+.Lvhe_cnthv_active:
+	str	x0, [x17, #AVR_HOST_CNTHV_CTL_EL2]
+	orr	x1, x0, #CNTV_CTL_IMASK
+	msr	s3_4_c14_c3_1, x1	/* CNTHV_CTL_EL2 */
+	isb
+	mrs	x0, s3_4_c14_c3_2	/* CNTHV_CVAL_EL2 */
+	str	x0, [x17, #AVR_HOST_CNTHV_CVAL_EL2]
+.Lvhe_cnthv_saved:
 	/* All lower-EL AArch64 exceptions now enter the vmm vector slots. */
 	adrp	x0, hyp_vectors
 	add	x0, x0, :lo12:hyp_vectors
 	msr	vbar_el2, x0
+	/*
+	 * VTTBR_EL2 and VTCR_EL2 are not restored for the VHE host.  A same-CPU
+	 * retry therefore retains the VM's stage-2 context and can avoid two
+	 * particularly expensive nested-virtualization traps.  A full entry,
+	 * including the first entry after migration, always installs both.
+	 */
+	cbnz	x15, .Lvhe_stage2_ready
 	ldr	x0, [x17, #AVR_VTTBR_EL2]
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
+.Lvhe_stage2_ready:
 	/* Install ICC trap policy before HCR_EL2.IMO exposes the virtual view. */
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
@@ -163,6 +222,16 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_HCR_EL2]
 	msr	hcr_el2, x0
 	isb
+	/*
+	 * The first arm64 machine model exposes only the physical timer.  Keep
+	 * the VHE guest's separate virtual timer output masked so its PPI cannot
+	 * remain asserted while the host rearms the hyp-virtual tick.  EL1TVT in
+	 * CNTHCTL_EL2 makes guest accesses trap instead of undoing this policy.
+	 * s3_5_c14_c3_1 is CNTV_CTL_EL02, the VHE alias for the guest bank.
+	 */
+	mov	x0, #CNTV_CTL_IMASK
+	msr	s3_5_c14_c3_1, x0
+	isb
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lvhe_tlb_done
 	/*
@@ -174,6 +243,15 @@ ENTRY(arm64_vmm_enter_vhe)
 	dsb	ish
 	isb
 .Lvhe_tlb_done:
+
+	/*
+	 * A physical interrupt does not alter the guest's banked EL12 state.
+	 * The immediate retry remains in the same vm_run() invocation on the
+	 * same host CPU, so it can reuse that state and avoid a long sequence of
+	 * nested system-register writes.  Every entry from userland takes the
+	 * full path, as does any entry whose state userland could have changed.
+	 */
+	cbnz	x15, .Lvhe_el12_done
 
 	/* Restore guest EL1 state through the VHE EL12 aliases. */
 	ldr	x0, [x17, #AVR_SCTLR_EL1]
@@ -203,6 +281,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	esr_el12, x0
 	ldr	x0, [x17, #AVR_FAR_EL1]
 	msr	far_el12, x0
+.Lvhe_el12_done:
+	/* EL0 and EL2 controls are shared with the VHE host and always reload. */
 	ldr	x0, [x17, #AVR_SP_EL0]
 	msr	sp_el0, x0
 	ldr	x0, [x17, #AVR_TPIDR_EL0]
@@ -211,8 +291,13 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	tpidrro_el0, x0
 	ldr	x0, [x17, #AVR_TPIDR_EL1]
 	msr	tpidr_el1, x0
-	ldr	x0, [x17, #AVR_CNTVOFF_EL2]
-	msr	cntvoff_el2, x0
+	/*
+	 * Keep the VHE host's CNTVOFF_EL2.  The guest's virtual counter then
+	 * inherits any offset applied by an outer hypervisor; on bare metal the
+	 * inherited value is normally zero.  Replacing it here would both expose
+	 * the wrong time base to a nested guest and force an expensive L0 trap on
+	 * every entry.
+	 */
 	ldr	x0, [x17, #AVR_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
 	ldr	x0, [x17, #AVR_VMPIDR_EL2]
@@ -266,6 +351,35 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	apgakeylo_el1, x0
 	msr	apgakeyhi_el1, x1
 	isb
+	/*
+	 * Guarantee a 250ms execution window only when the saved deadline is
+	 * earlier.  CNTHV_CVAL_EL2 and CNTVCT_EL0 use the same virtual-count
+	 * domain.  Deriving the quantum from CNTFRQ_EL0 keeps this independent of
+	 * the platform counter frequency.  Unmasking is deliberately the last
+	 * timer operation before ERET, so the outer GIC cannot latch the timer PPI
+	 * during a slow nested entry.  The old timer state is restored on every
+	 * exit, so delayed OpenBSD clock work is dispatched immediately afterward.
+	 */
+	ldr	x0, [x17, #AVR_DEFER_CNTHV]
+	cbz	x0, .Lvhe_cnthv_deferred
+	mrs	x0, cntvct_el0
+	mrs	x1, cntfrq_el0
+	mov	x2, #4
+	udiv	x1, x1, x2
+	add	x0, x0, x1
+	ldr	x1, [x17, #AVR_HOST_CNTHV_CVAL_EL2]
+	cmp	x1, x0
+	b.ls	.Lvhe_extend_cnthv
+	str	xzr, [x17, #AVR_DEFER_CNTHV]
+	b	.Lvhe_unmask_cnthv
+.Lvhe_extend_cnthv:
+	msr	s3_4_c14_c3_2, x0	/* CNTHV_CVAL_EL2 */
+
+.Lvhe_unmask_cnthv:
+	ldr	x0, [x17, #AVR_HOST_CNTHV_CTL_EL2]
+	msr	s3_4_c14_c3_1, x0	/* CNTHV_CTL_EL2 */
+	isb
+.Lvhe_cnthv_deferred:
 
 	/* x17 is the run-page pointer, so restore the guest's x17 last. */
 	ldp	x0, x1, [x17, #AVR_GPRS + 0]
@@ -306,10 +420,13 @@ END(arm64_vmm_enter_vhe)
  * non-zero value identifies an exception taken from the guest.
  */
 ENTRY_NP(vmm_hyp_sync)
-	stp	x16, x17, [sp, #-16]!
+	sub	sp, sp, #32
+	stp	x16, x17, [sp]
+	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbnz	x17, .Lguest_sync
-	ldp	x16, x17, [sp], #16
+	ldp	x16, x17, [sp]
+	add	sp, sp, #32
 
 	/* Only the private host-entry HVC is accepted outside guest context. */
 	mrs	x16, esr_el2
@@ -544,7 +661,9 @@ ENTRY_NP(vmm_hyp_sync)
 
 ENTRY_NP(vmm_hyp_irq)
 	/* Do not acknowledge the IRQ here; the restored host kernel will. */
-	stp	x16, x17, [sp, #-16]!
+	sub	sp, sp, #32
+	stp	x16, x17, [sp]
+	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
 	mov	x16, #ARM64_VMM_EXIT_IRQ
@@ -554,7 +673,9 @@ END(vmm_hyp_irq)
 
 ENTRY_NP(vmm_hyp_fiq)
 	/* FIQ follows the same transparent host-delivery path as IRQ. */
-	stp	x16, x17, [sp, #-16]!
+	sub	sp, sp, #32
+	stp	x16, x17, [sp]
+	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
 	mov	x16, #ARM64_VMM_EXIT_FIQ
@@ -564,7 +685,9 @@ END(vmm_hyp_fiq)
 
 ENTRY_NP(vmm_hyp_serror)
 	/* C currently treats a physical SError observed in a vCPU as fatal. */
-	stp	x16, x17, [sp, #-16]!
+	sub	sp, sp, #32
+	stp	x16, x17, [sp]
+	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
 	mov	x16, #ARM64_VMM_EXIT_SERROR
@@ -573,14 +696,11 @@ END(vmm_hyp_serror)
 
 .Lguest_exit:
 	/*
-	 * x16/x17 were saved by the vector stub, but all other guest GPRs are
-	 * still live.  CNTVOFF_EL2 temporarily holds x18 while x18 becomes the
-	 * run-page base; its real value is already present in the run page and
-	 * will be restored later.
+	 * x16-x18 were saved by the vector stub and all other guest GPRs are
+	 * still live.  Use x18 for the run-page base, then recover all three
+	 * saved registers after x0-x15 no longer need to remain live.
 	 */
-	msr	cntvoff_el2, x18
 	mrs	x18, tpidr_el2
-	ldp	x16, x17, [sp], #16
 
 	stp	x0, x1, [x18, #AVR_GPRS + 0]
 	stp	x2, x3, [x18, #AVR_GPRS + 16]
@@ -590,15 +710,17 @@ END(vmm_hyp_serror)
 	stp	x10, x11, [x18, #AVR_GPRS + 80]
 	stp	x12, x13, [x18, #AVR_GPRS + 96]
 	stp	x14, x15, [x18, #AVR_GPRS + 112]
+	ldp	x16, x17, [sp]
 	stp	x16, x17, [x18, #AVR_GPRS + 128]
+	ldr	x0, [sp, #16]
+	str	x0, [x18, #AVR_GPRS + 144]
+	add	sp, sp, #32
 	stp	x19, x20, [x18, #AVR_GPRS + 152]
 	stp	x21, x22, [x18, #AVR_GPRS + 168]
 	stp	x23, x24, [x18, #AVR_GPRS + 184]
 	stp	x25, x26, [x18, #AVR_GPRS + 200]
 	stp	x27, x28, [x18, #AVR_GPRS + 216]
 	stp	x29, x30, [x18, #AVR_GPRS + 232]
-	mrs	x0, cntvoff_el2
-	str	x0, [x18, #AVR_GPRS + 144]
 
 	/*
 	 * FP/AdvSIMD has no EL1/EL2 bank.  Capture it before restoring any host
@@ -694,6 +816,23 @@ END(vmm_hyp_serror)
 	b	.Lsave_guest_done
 
 .Lsave_guest_vhe:
+	/*
+	 * A non-final physical-interrupt exit is followed immediately by a
+	 * same-CPU retry.  EL12 is a separate hardware bank under VHE and host
+	 * interrupt handling cannot modify it, so leave it resident rather than
+	 * forcing a long series of nested reads.  Synchronous exits and the final
+	 * bounded asynchronous exit take the full snapshot below.
+	 */
+	ldr	x0, [x18, #AVR_EXIT]
+	cmp	x0, #ARM64_VMM_EXIT_IRQ
+	b.eq	.Lsave_guest_vhe_async
+	cmp	x0, #ARM64_VMM_EXIT_FIQ
+	b.ne	.Lsave_guest_vhe_full
+.Lsave_guest_vhe_async:
+	ldr	x0, [x18, #AVR_HOST_ESR_EL1]
+	cbz	x0, .Lsave_guest_done
+
+.Lsave_guest_vhe_full:
 	/* In VHE the guest EL1 bank remains accessible through EL12. */
 	mrs	x0, elr_el12
 	str	x0, [x18, #AVR_ELR_EL1]
@@ -732,6 +871,26 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_FAR_EL2]
 	mrs	x0, hpfar_el2
 	str	x0, [x18, #AVR_HPFAR_EL2]
+	/*
+	 * Restore a deferred VHE host deadline before HCR_EL2 selects the host
+	 * context again.  Keep the timer masked while replacing an expired CVAL,
+	 * then restore the saved control word.  The ordinary OpenBSD handler runs
+	 * after our ERET if the original deadline passed while the guest ran.
+	 */
+	ldr	x0, [x18, #AVR_MODE]
+	cmp	x0, #ARM64_VMM_MODE_VHE
+	b.ne	.Lrestore_cnthv_done
+	ldr	x0, [x18, #AVR_DEFER_CNTHV]
+	cbz	x0, .Lrestore_cnthv_done
+	ldr	x0, [x18, #AVR_HOST_CNTHV_CTL_EL2]
+	orr	x0, x0, #CNTV_CTL_IMASK
+	msr	s3_4_c14_c3_1, x0	/* CNTHV_CTL_EL2 */
+	ldr	x0, [x18, #AVR_HOST_CNTHV_CVAL_EL2]
+	msr	s3_4_c14_c3_2, x0	/* CNTHV_CVAL_EL2 */
+	ldr	x0, [x18, #AVR_HOST_CNTHV_CTL_EL2]
+	msr	s3_4_c14_c3_1, x0	/* CNTHV_CTL_EL2 */
+	isb
+.Lrestore_cnthv_done:
 
 	/*
 	 * Restore the host keys before any authenticated host return can execute.
@@ -804,8 +963,6 @@ END(vmm_hyp_serror)
 	msr	tpidrro_el0, x0
 	ldr	x0, [x18, #AVR_HOST_TPIDR_EL1]
 	msr	tpidr_el1, x0
-	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
-	msr	cntvoff_el2, x0
 	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
 	ldr	x0, [x18, #AVR_HOST_VMPIDR_EL2]
@@ -853,8 +1010,6 @@ END(vmm_hyp_serror)
 	msr	tpidrro_el0, x0
 	ldr	x0, [x18, #AVR_HOST_TPIDR_EL1]
 	msr	tpidr_el1, x0
-	ldr	x0, [x18, #AVR_HOST_CNTVOFF_EL2]
-	msr	cntvoff_el2, x0
 	ldr	x0, [x18, #AVR_HOST_CNTHCTL_EL2]
 	msr	cnthctl_el2, x0
 	ldr	x0, [x18, #AVR_HOST_VMPIDR_EL2]

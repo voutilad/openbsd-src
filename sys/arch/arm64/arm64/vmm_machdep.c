@@ -57,12 +57,13 @@
 #define VMM_S2_PAGE_SIZE	(4 * PAGE_SIZE)
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
+#define VMM_ASYNC_RETRIES	8
 
 /* CNTHCTL_EL2.EL1PCTEN moves from bit 0 to bit 10 when E2H is set. */
 #define CNTHCTL_EL1PCTEN_VHE	(1 << 10)
 
 int	arm64_vmm_enter_nvhe(paddr_t);
-int	arm64_vmm_enter_vhe(vaddr_t);
+int	arm64_vmm_enter_vhe(vaddr_t, int, int, int);
 
 static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
@@ -530,9 +531,10 @@ arm64_vmm_load_run(struct vcpu *vcpu)
 	 * CNTHCTL_EL2 uses different enable bits in VHE and non-VHE modes.
 	 */
 	if (arm64_has_el2 == 2)
-		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN_VHE;
+		run->avr_cnthctl_el2 =
+		    CNTHCTL_EL1PCTEN_VHE | CNTHCTL_EL1TVT;
 	else
-		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN;
+		run->avr_cnthctl_el2 = CNTHCTL_EL1PCTEN | CNTHCTL_EL1TVT;
 }
 
 static void
@@ -575,10 +577,11 @@ vm_run(struct vm_run_params *vrp)
 	struct arm64_vmm_run *run;
 	struct vm *vm;
 	struct vcpu *vcpu;
+	struct cpu_info *entry_ci;
 	paddr_t ipa, last_ipa = (paddr_t)-1;
-	uint64_t ec;
-	u_int old, retries = 0;
-	int error = 0;
+	uint64_t ec, entry_pc;
+	u_int irq_retries = 0, no_progress = 0, old, retries = 0;
+	int defer_timer, error = 0, fast_entry, save_async;
 
 	error = vm_find(vrp->vrp_vm_id, &vm);
 	if (error)
@@ -620,6 +623,7 @@ vm_run(struct vm_run_params *vrp)
 	for (;;) {
 		/* Materialize the saved vCPU state in the EL2 run page. */
 		arm64_vmm_load_run(vcpu);
+		entry_pc = run->avr_pc;
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 		/*
 		 * A guest may use FP/AdvSIMD whenever its CPACR_EL1 permits it.
@@ -629,8 +633,13 @@ vm_run(struct vm_run_params *vrp)
 		 * its saved state instead of observing the guest's vector registers.
 		 */
 		fpu_kernel_enter();
+		fast_entry = (irq_retries != 0);
+		save_async = (irq_retries == VMM_ASYNC_RETRIES);
+		defer_timer = (no_progress >= 2);
+		entry_ci = curcpu();
 		if (arm64_has_el2 == 2)
-			arm64_vmm_enter_vhe(vcpu->vc_control_va);
+			arm64_vmm_enter_vhe(vcpu->vc_control_va,
+			    fast_entry, save_async, defer_timer);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
 		fpu_kernel_exit();
@@ -649,8 +658,41 @@ vm_run(struct vm_run_params *vrp)
 		 * run; userland simply retries VMM_IOC_RUN.
 		 */
 		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
-		    run->avr_exit == ARM64_VMM_EXIT_FIQ)
+		    run->avr_exit == ARM64_VMM_EXIT_FIQ) {
+			if (run->avr_pc == entry_pc) {
+				if (no_progress < 2)
+					no_progress++;
+			} else
+				no_progress = 0;
+			/*
+			 * Retry a short, bounded sequence before returning to userland.
+			 * A physical timer can arrive while a nested hypervisor is still
+			 * restoring the guest context; if every such exit crosses the
+			 * ioctl boundary, the next tick can arrive before the guest
+			 * retires even one instruction.  Deferring the host virtual timer
+			 * after repeated no-progress exits prevents that timer from starving
+			 * a nested guest during its comparatively expensive entry sequence.
+			 * The small bound still covers unrelated asynchronous work without
+			 * keeping the calling process in the kernel for an unbounded interval.
+			 *
+			 * arm64 defers a reschedule requested by an interrupt taken from
+			 * system mode until this ioctl returns.  The retry therefore stays
+			 * on entry_ci and may reuse that CPU's resident EL12 bank.  The
+			 * final asynchronous exit takes the full save path and supplies
+			 * the regular userland scheduling point.
+			 */
+			KASSERT(entry_ci == curcpu());
+			if (irq_retries++ < VMM_ASYNC_RETRIES)
+				continue;
 			break;
+		}
+		/*
+		 * A synchronous exit snapshots EL12 before C handles it.  Handling a
+		 * stage-2 fault may sleep, so the following entry must be a full one
+		 * even if an asynchronous retry preceded this exception.
+		 */
+		irq_retries = 0;
+		no_progress = 0;
 		/* SError is host-fatal until recovery semantics are designed. */
 		if (run->avr_exit == ARM64_VMM_EXIT_SERROR)
 			panic("%s: SError while running vcpu", __func__);

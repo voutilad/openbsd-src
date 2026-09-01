@@ -247,6 +247,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_cnthctl_el2;
 	/* Affinity reported by a guest read of MPIDR_EL1. */
 	uint64_t	avr_vmpidr_el2;
+	/* Request a short host-timer deferral to guarantee guest progress. */
+	uint64_t	avr_defer_cnthv;
 
 	/* Host state overwritten while the guest context is installed. */
 	uint64_t	avr_host_sp;
@@ -271,6 +273,9 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_tpidr_el1;
 	uint64_t	avr_host_cntvoff_el2;
 	uint64_t	avr_host_cnthctl_el2;
+	/* Original VHE host virtual-timer state while it is deferred. */
+	uint64_t	avr_host_cnthv_ctl_el2;
+	uint64_t	avr_host_cnthv_cval_el2;
 	uint64_t	avr_host_vmpidr_el2;
 	uint64_t	avr_host_hcr_el2;
 	/* ICH_HCR_EL2 belongs to the host CPU and must survive each run. */

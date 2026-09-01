@@ -128,6 +128,7 @@ member	avr_flush_tlb
 member	avr_cntvoff_el2
 member	avr_cnthctl_el2
 member	avr_vmpidr_el2
+member	avr_defer_cnthv
 member	avr_host_sp
 member	avr_host_sp_el0
 member	avr_host_pc
@@ -150,6 +151,8 @@ member	avr_host_tpidrro_el0
 member	avr_host_tpidr_el1
 member	avr_host_cntvoff_el2
 member	avr_host_cnthctl_el2
+member	avr_host_cnthv_ctl_el2
+member	avr_host_cnthv_cval_el2
 member	avr_host_vmpidr_el2
 member	avr_host_hcr_el2
 member	avr_host_ich_hcr_el2
