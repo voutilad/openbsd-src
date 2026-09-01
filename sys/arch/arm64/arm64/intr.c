@@ -945,11 +945,37 @@ intr_disable_wakeup(void)
 		arm_intr_func.disable_wakeup();
 }
 
-#ifdef MULTIPROCESSOR
 /*
  * IPI implementation
  */
 
+void (*intr_disable_ipi_func)(void);
+void (*intr_enable_ipi_func)(void);
+
+/*
+ * A hypervisor may need a short interval in which a pending host IPI cannot
+ * repeatedly preempt guest entry.  The interrupt controller owns the actual
+ * SGI/PPI enable state, so make this optional on controllers which can mask
+ * and later replay their IPI interrupt on the current CPU.
+ */
+int
+arm_intr_disable_ipi(void)
+{
+	if (intr_disable_ipi_func == NULL || intr_enable_ipi_func == NULL)
+		return (0);
+
+	(*intr_disable_ipi_func)();
+	return (1);
+}
+
+void
+arm_intr_enable_ipi(void)
+{
+	KASSERT(intr_enable_ipi_func != NULL);
+	(*intr_enable_ipi_func)();
+}
+
+#ifdef MULTIPROCESSOR
 void arm_no_send_ipi(struct cpu_info *ci, int id);
 void (*intr_send_ipi_func)(struct cpu_info *, int) = arm_no_send_ipi;
 

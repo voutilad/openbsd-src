@@ -268,6 +268,8 @@ int		agintc_ipi_ddb(void *v);
 int		agintc_ipi_halt(void *v);
 int		agintc_ipi_handler(void *);
 void		agintc_send_ipi(struct cpu_info *, int);
+void		agintc_disable_ipi(void);
+void		agintc_enable_ipi(void);
 
 void		agintc_msi_discard(struct agintc_lpi_info *);
 void		agintc_msi_inv(struct agintc_lpi_info *);
@@ -640,6 +642,8 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_ipi_num = ipiirq;
 
 	intr_send_ipi_func = agintc_send_ipi;
+	intr_disable_ipi_func = agintc_disable_ipi;
+	intr_enable_ipi_func = agintc_enable_ipi;
 #endif
 
 	sc->sc_ic.ic_node = faa->fa_node;
@@ -1406,6 +1410,33 @@ agintc_r_wait_rwp(struct agintc_softc *sc)
 }
 
 #ifdef MULTIPROCESSOR
+/*
+ * Temporarily mask the IPI SGI on this CPU.  GIC pending state is preserved
+ * while an interrupt is disabled, and sc_ipi_reason separately retains all
+ * non-NOP reasons, so reenabling the SGI replays rather than loses the work.
+ * Waiting for RWP is essential when the caller is about to enter a guest:
+ * without it, an earlier ICENABLER write could still be in flight.
+ */
+void
+agintc_disable_ipi(void)
+{
+	struct agintc_softc *sc = agintc_sc;
+
+	agintc_intr_disable(sc, sc->sc_ipi_num);
+	agintc_r_wait_rwp(sc);
+	__asm volatile("dsb sy" ::: "memory");
+}
+
+void
+agintc_enable_ipi(void)
+{
+	struct agintc_softc *sc = agintc_sc;
+
+	agintc_intr_enable(sc, sc->sc_ipi_num);
+	agintc_r_wait_rwp(sc);
+	__asm volatile("dsb sy" ::: "memory");
+}
+
 int
 agintc_ipi_ddb(void *v)
 {

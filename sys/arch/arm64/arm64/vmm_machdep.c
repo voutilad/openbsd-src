@@ -581,7 +581,7 @@ vm_run(struct vm_run_params *vrp)
 	paddr_t ipa, last_ipa = (paddr_t)-1;
 	uint64_t ec, entry_pc;
 	u_int irq_retries = 0, no_progress = 0, old, retries = 0;
-	int defer_timer, error = 0, fast_entry, save_async;
+	int defer_timer, error = 0, fast_entry, ipi_disabled, save_async;
 
 	error = vm_find(vrp->vrp_vm_id, &vm);
 	if (error)
@@ -637,11 +637,23 @@ vm_run(struct vm_run_params *vrp)
 		save_async = (irq_retries == VMM_ASYNC_RETRIES);
 		defer_timer = (no_progress >= 2);
 		entry_ci = curcpu();
+		/*
+		 * On an MP host, scheduler IPIs can arrive faster than a nested VHE
+		 * entry completes.  Once repeated exits demonstrate starvation, ask
+		 * the interrupt controller to retain this CPU's IPI as pending during
+		 * the bounded recovery entry.  The host timer remains enabled and
+		 * therefore continues to bound guest execution.
+		 */
+		ipi_disabled = defer_timer && arm_intr_disable_ipi();
 		if (arm64_has_el2 == 2)
 			arm64_vmm_enter_vhe(vcpu->vc_control_va,
 			    fast_entry, save_async, defer_timer);
 		else
 			arm64_vmm_enter_nvhe(vcpu->vc_control_pa);
+		if (ipi_disabled) {
+			KASSERT(entry_ci == curcpu());
+			arm_intr_enable_ipi();
+		}
 		fpu_kernel_exit();
 		/*
 		 * EL2 has executed the requested TLBI even if a pending host IRQ

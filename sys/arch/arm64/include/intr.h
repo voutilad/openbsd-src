@@ -197,6 +197,10 @@ void	 arm_intr_parent_disestablish_fdt(void *);
 
 void	 arm_send_ipi(struct cpu_info *, int);
 extern void (*intr_send_ipi_func)(struct cpu_info *, int);
+int	 arm_intr_disable_ipi(void);
+void	 arm_intr_enable_ipi(void);
+extern void (*intr_disable_ipi_func)(void);
+extern void (*intr_enable_ipi_func)(void);
 
 #define ARM_IPI_NOP	0
 #define ARM_IPI_DDB	1
@@ -232,4 +236,3 @@ void arm_splassert_check(int, const char *);
 #endif /* _KERNEL */
 
 #endif	/* _MACHINE_INTR_H_ */
-
