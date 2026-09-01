@@ -42,10 +42,11 @@
 
 /*
  * Enable FP at EL1, fill the low and high ends of the vector file, and set
- * FPCR before the first HVC.  Userland advances that HVC and re-enters.  The
- * guest then exports both vector values and FPCR through GPRs before taking
- * a second HVC.  This proves that private guest FP state survives a complete
- * exit even though VMM_IOC_READREGS intentionally exposes only GPR state.
+ * FPCR before the first HVC.  ELR_EL2 already identifies the following
+ * instruction, so userland can re-enter directly.  The guest then exports
+ * both vector values and FPCR through GPRs before taking a second HVC.  This
+ * proves that private guest FP state survives a complete exit even though
+ * VMM_IOC_READREGS intentionally exposes only GPR state.
  */
 static const uint32_t guest_code[] = {
 	0xd2800060,	/* mov x0, #3 */
@@ -106,7 +107,6 @@ main(void)
 	struct vm_exit vmexit;
 	struct vm_resetcpu_params reset;
 	struct vm_run_params run;
-	struct vm_rwregs_params write;
 	struct vm_sharemem_params share;
 	struct vm_terminate_params term;
 	struct sigaction sa;
@@ -167,20 +167,9 @@ main(void)
 		goto out_alarm;
 	}
 	if (run.vrp_exit_reason != VM_EXIT_HVC ||
-	    vmexit.vrs.vrs_pc != 9 * sizeof(uint32_t)) {
+	    vmexit.vrs.vrs_pc != 10 * sizeof(uint32_t)) {
 		warnx("unexpected first exit: reason 0x%04x pc 0x%llx",
 		    run.vrp_exit_reason, vmexit.vrs.vrs_pc);
-		goto out_alarm;
-	}
-
-	/* HVC leaves ELR_EL2 on the trapping instruction; emulate completion. */
-	vmexit.vrs.vrs_pc += sizeof(uint32_t);
-	memset(&write, 0, sizeof(write));
-	write.vrwp_vm_id = create.vcp_id;
-	write.vrwp_mask = VM_RWREGS_ALL;
-	memcpy(&write.vrwp_regs, &vmexit.vrs, sizeof(write.vrwp_regs));
-	if (ioctl(fd, VMM_IOC_WRITEREGS, &write) == -1) {
-		warn("VMM_IOC_WRITEREGS");
 		goto out_alarm;
 	}
 
@@ -189,7 +178,7 @@ main(void)
 		goto out_alarm;
 	}
 	if (run.vrp_exit_reason != VM_EXIT_HVC ||
-	    vmexit.vrs.vrs_pc != 14 * sizeof(uint32_t) ||
+	    vmexit.vrs.vrs_pc != 15 * sizeof(uint32_t) ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != 0x42 ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X1] != GUEST_V8_PATTERN ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X2] != GUEST_V31_PATTERN ||
