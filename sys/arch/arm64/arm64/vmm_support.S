@@ -229,35 +229,13 @@ ENTRY(arm64_vmm_enter_vhe)
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lvhe_tlb_done
 	/*
-	 * Value one is the full combined invalidation required after a stage-2
-	 * mapping change or stale nested-shadow detection.  Larger values replay
-	 * a trapped guest stage-1 TLBI after selecting its VTTBR.  Preserve the
-	 * operand so an outer hypervisor can associate VA and ASID with its shadow.
+	 * vmm owns this full combined invalidation.  It is required after a
+	 * stage-2 mapping change, vCPU migration, or stale nested-shadow detection.
+	 * Guest stage-1 TLBIs are never replayed here: they execute through the
+	 * architectural guest path.
 	 */
 	dsb	ishst
-	cmp	x0, #2
-	b.eq	.Lvhe_tlbi_vmalle1
-	ldr	x1, [x17, #AVR_TLBI_ARG]
-	cmp	x0, #3
-	b.eq	.Lvhe_tlbi_vae1
-	cmp	x0, #4
-	b.eq	.Lvhe_tlbi_vaae1
-	cmp	x0, #5
-	b.eq	.Lvhe_tlbi_aside1
 	tlbi	vmalls12e1is
-	b	.Lvhe_tlbi_barrier
-.Lvhe_tlbi_vmalle1:
-	tlbi	vmalle1is
-	b	.Lvhe_tlbi_barrier
-.Lvhe_tlbi_vae1:
-	tlbi	vae1is, x1
-	b	.Lvhe_tlbi_barrier
-.Lvhe_tlbi_vaae1:
-	tlbi	vaae1is, x1
-	b	.Lvhe_tlbi_barrier
-.Lvhe_tlbi_aside1:
-	tlbi	aside1is, x1
-.Lvhe_tlbi_barrier:
 	dsb	ish
 	isb
 .Lvhe_tlb_done:
@@ -547,31 +525,9 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lnvhe_tlb_done
-	/* See the VHE path above for the operation encoding and ordering. */
+	/* See the VHE path above for ownership and ordering. */
 	dsb	ishst
-	cmp	x0, #2
-	b.eq	.Lnvhe_tlbi_vmalle1
-	ldr	x1, [x17, #AVR_TLBI_ARG]
-	cmp	x0, #3
-	b.eq	.Lnvhe_tlbi_vae1
-	cmp	x0, #4
-	b.eq	.Lnvhe_tlbi_vaae1
-	cmp	x0, #5
-	b.eq	.Lnvhe_tlbi_aside1
 	tlbi	vmalls12e1is
-	b	.Lnvhe_tlbi_barrier
-.Lnvhe_tlbi_vmalle1:
-	tlbi	vmalle1is
-	b	.Lnvhe_tlbi_barrier
-.Lnvhe_tlbi_vae1:
-	tlbi	vae1is, x1
-	b	.Lnvhe_tlbi_barrier
-.Lnvhe_tlbi_vaae1:
-	tlbi	vaae1is, x1
-	b	.Lnvhe_tlbi_barrier
-.Lnvhe_tlbi_aside1:
-	tlbi	aside1is, x1
-.Lnvhe_tlbi_barrier:
 	dsb	ish
 	isb
 .Lnvhe_tlb_done:

@@ -129,7 +129,6 @@ member	avr_exit
 member	avr_async_par
 member	avr_async_pc
 member	avr_flush_tlb
-member	avr_tlbi_arg
 member	avr_cntv_ctl_el0
 member	avr_cntv_cval_el0
 member	avr_cntvct_el0

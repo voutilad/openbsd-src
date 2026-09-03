@@ -273,9 +273,8 @@ struct arm64_vmm_run {
 	/* Combined translation probe sampled while an EL0 instruction ran. */
 	uint64_t	avr_async_par;
 	uint64_t	avr_async_pc;
-	/* Pending EL2 translation-maintenance operation and optional operand. */
+	/* Pending vmm-owned combined stage-1/stage-2 invalidation. */
 	uint64_t	avr_flush_tlb;
-	uint64_t	avr_tlbi_arg;
 	/* Guest virtual timer bank used directly by a VHE EL1 guest. */
 	uint64_t	avr_cntv_ctl_el0;
 	uint64_t	avr_cntv_cval_el0;

@@ -59,12 +59,8 @@
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 #define VMM_ASYNC_RETRIES	8
 
-/* avr_flush_tlb operations consumed by the EL2 entry assembly. */
+/* avr_flush_tlb operation consumed by the EL2 entry assembly. */
 #define VMM_TLBI_VMALLS12E1IS	1
-#define VMM_TLBI_VMALLE1IS	2
-#define VMM_TLBI_VAE1IS		3
-#define VMM_TLBI_VAAE1IS	4
-#define VMM_TLBI_ASIDE1IS	5
 
 /* Atomic software form of the one interrupt selected by userland. */
 #define VMM_INTR_VALID		(1UL << 63)
@@ -86,7 +82,6 @@ static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static int	arm64_vmm_irqcfg(struct vm_irqcfg_params *);
 static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
-static int	arm64_vmm_is_tlbi(uint64_t);
 static void	arm64_vmm_load_intr(struct vcpu *);
 static void	arm64_vmm_load_run(struct vcpu *, int);
 static void	arm64_vmm_save_run(struct vcpu *);
@@ -122,21 +117,6 @@ arm64_vmm_defer_host_timer(struct arm64_vmm_run *run)
 	run->avr_host_cnthv_ctl_el2 = ctl;
 	run->avr_host_cnthv_cval_el2 = cval;
 	return (1);
-}
-
-/*
- * HCR_EL2.TTLB reports an EL1 TLBI as an EXCP_MSR trap.  TLBI belongs to the
- * SYS instruction space (op0 == 1), where CRn == 8 uniquely identifies the
- * translation-maintenance group.  vm_run() decodes the small EL1 operand
- * families below and asks the entry assembly to replay the corresponding
- * inner-shareable operation after selecting the vCPU's stage-2 context.
- */
-static int
-arm64_vmm_is_tlbi(uint64_t esr)
-{
-	return ((esr & ESR_ELx_IL) != 0 && ISS_MSR_OP0(esr) == 1 &&
-	    ISS_MSR_OP1(esr) == 0 && ISS_MSR_CRn(esr) == 8 &&
-	    (ISS_MSR_CRm(esr) == 3 || ISS_MSR_CRm(esr) == 7));
 }
 
 int
@@ -707,16 +687,14 @@ arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 	 * its local cache/TLB maintenance to the inner-shareable domain and
 	 * upgrade its barriers accordingly; otherwise a translation-fault entry
 	 * left on one host CPU can reappear after the vCPU migrates back to it.
-	 * Trap guest stage-1 TLB maintenance so the entry path can replay it after
-	 * selecting this vCPU's HCR and VTTBR.  This is equivalent to native
-	 * execution on bare metal and, when vmm is itself nested, gives the outer
-	 * hypervisor a vEL2 operation associated with the correct shadow VMID.
-	 * Without that replay, a nested shadow can retain a negative EL0
-	 * translation across the guest's otherwise-correct VAE1IS.
+	 * Leave guest stage-1 TLB maintenance untrapped.  It executes directly on
+	 * bare metal, while an outer hypervisor providing virtual EL2 associates
+	 * the architectural operation with this HCR/VTTBR context.  vmm therefore
+	 * neither decodes nor advances a guest TLBI instruction.
 	 */
 	run->avr_hcr_el2 = HCR_VM | HCR_RW | HCR_TWI | HCR_TWE |
 	    HCR_API | HCR_APK | HCR_IMO | HCR_FMO | HCR_AMO |
-	    HCR_FB | HCR_BSU_IS | HCR_TTLB;
+	    HCR_FB | HCR_BSU_IS;
 	/*
 	 * HCR_EL2.IMO makes Non-secure EL1 Group 1 ICC accesses select the
 	 * virtual CPU interface.  Leave TALL1 and TC clear: the guest's IAR, EOIR,
@@ -1048,42 +1026,6 @@ vm_run(struct vm_run_params *vrp)
 			panic("%s: unknown EL2 exit %llu", __func__,
 			    run->avr_exit);
 		ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
-
-		/*
-		 * Complete trapped guest translation maintenance in the kernel.  The
-		 * next entry performs the conservative combined invalidation after the
-		 * guest's stage-2 context is selected.  Advancing PC here makes the
-		 * operation atomic from userland's perspective and avoids exposing a
-		 * private maintenance exit through the vmm(4) API.
-		 */
-		if (ec == EXCP_MSR && arm64_vmm_is_tlbi(run->avr_esr_el2)) {
-			u_int reg = ISS_MSR_Rt(run->avr_esr_el2);
-
-			vcpu->vc_regs.vrs_pc += sizeof(uint32_t);
-			run->avr_tlbi_arg = reg == 31 ? 0 :
-			    vcpu->vc_regs.vrs_gprs[reg];
-			switch (ISS_MSR_OP2(run->avr_esr_el2)) {
-			case 0:	/* VMALLE1{,IS} */
-				run->avr_flush_tlb = VMM_TLBI_VMALLE1IS;
-				break;
-			case 1:	/* VAE1{,IS} */
-			case 5:	/* VALE1{,IS}; VAE is a safe superset. */
-				run->avr_flush_tlb = VMM_TLBI_VAE1IS;
-				break;
-			case 2:	/* ASIDE1{,IS} */
-				run->avr_flush_tlb = VMM_TLBI_ASIDE1IS;
-				break;
-			case 3:	/* VAAE1{,IS} */
-			case 7:	/* VAALE1{,IS}; VAAE is a safe superset. */
-				run->avr_flush_tlb = VMM_TLBI_VAAE1IS;
-				break;
-			default:
-				/* Unknown EL1 TLBI: retain correctness conservatively. */
-				run->avr_flush_tlb = VMM_TLBI_VMALLS12E1IS;
-				break;
-			}
-			continue;
-		}
 
 		if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L) {
 			/* HPFAR supplies IPA[47:12], while FAR supplies its offset. */
