@@ -65,6 +65,11 @@ extern char tlbi_success_start[], tlbi_success_end[];
 
 static volatile sig_atomic_t alarm_fired;
 
+struct tlbi_case {
+	const char	*tc_name;
+	uint64_t	 tc_selector;
+};
+
 static void
 alarm_handler(int sig)
 {
@@ -94,8 +99,8 @@ run_to_exit(int fd, struct vm_run_params *run)
 	return (alarm_fired ? ETIMEDOUT : 0);
 }
 
-int
-main(void)
+static int
+run_case(int fd, const struct tlbi_case *tc)
 {
 	struct vm_create_params create;
 	struct vm_exit vmexit;
@@ -103,23 +108,22 @@ main(void)
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
 	struct vm_terminate_params term;
-	struct sigaction sa;
 	uint64_t *l1, *l2, *l3;
 	uint64_t target_pte;
 	char *mem;
-	int error, fd, i, ret = 1;
-
-	fd = open(VMM_NODE, O_RDWR);
-	if (fd == -1)
-		err(1, "open %s", VMM_NODE);
+	int created = 0, error, i, ret = 1;
 
 	memset(&create, 0, sizeof(create));
-	strlcpy(create.vcp_name, "tlbi", sizeof(create.vcp_name));
+	snprintf(create.vcp_name, sizeof(create.vcp_name), "tlbi-%s",
+	    tc->tc_name);
 	create.vcp_ncpus = 1;
 	create.vcp_nmemranges = 1;
 	create.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
-	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1)
-		err(1, "VMM_IOC_CREATE");
+	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1) {
+		warn("VMM_IOC_CREATE %s", tc->tc_name);
+		return (1);
+	}
+	created = 1;
 
 	memset(&share, 0, sizeof(share));
 	share.vsp_vm_id = create.vcp_id;
@@ -171,54 +175,86 @@ main(void)
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X1] = target_pte;
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X2] = TARGET_VA >> 12;
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X3] = VECTOR2_PA;
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X5] = tc->tc_selector;
 	if (ioctl(fd, VMM_IOC_RESETCPU, &reset) == -1) {
 		warn("VMM_IOC_RESETCPU");
 		goto out;
 	}
 
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = alarm_handler;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGALRM, &sa, NULL) == -1) {
-		warn("sigaction");
-		goto out;
-	}
 	memset(&vmexit, 0, sizeof(vmexit));
 	memset(&run, 0, sizeof(run));
 	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
+	alarm_fired = 0;
 	alarm(10);
 	error = run_to_exit(fd, &run);
 	alarm(0);
 	if (error != 0) {
-		warnc(error, "guest TLBI did not make its new mapping visible "
+		warnc(error, "%s did not make its new mapping visible "
 		    "(handler count 0x%llx, pc 0x%llx, elr 0x%llx)",
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X4], vmexit.vrs.vrs_pc,
-		    vmexit.vrs.vrs_elr_el1);
+		    tc->tc_name, vmexit.vrs.vrs_gprs[VCPU_REGS_X4],
+		    vmexit.vrs.vrs_pc, vmexit.vrs.vrs_elr_el1);
 		goto out;
 	}
 	if (run.vrp_exit_reason != VM_EXIT_HVC ||
 	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != 0x42) {
-		warnx("unexpected exit 0x%x: x0 0x%llx pc 0x%llx esr 0x%llx",
+		warnx("%s returned unexpected exit 0x%x: x0 0x%llx "
+		    "pc 0x%llx esr 0x%llx", tc->tc_name,
 		    run.vrp_exit_reason, vmexit.vrs.vrs_gprs[VCPU_REGS_X0],
 		    vmexit.vrs.vrs_pc, vmexit.vesr);
 		goto out;
 	}
 	if (vmexit.vrs.vrs_gprs[VCPU_REGS_X4] != 1) {
-		warnx("mapping required 0x%llx instruction-abort retries",
-		    vmexit.vrs.vrs_gprs[VCPU_REGS_X4]);
+		warnx("%s required 0x%llx instruction-abort retries",
+		    tc->tc_name, vmexit.vrs.vrs_gprs[VCPU_REGS_X4]);
 		goto out;
 	}
 
-	printf("guest stage-1 TLBI exposed a newly executable EL0 page\n");
 	ret = 0;
 out:
-	memset(&term, 0, sizeof(term));
-	term.vtp_vm_id = create.vcp_id;
-	if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
-		warn("VMM_IOC_TERM");
-		ret = 1;
+	if (created) {
+		memset(&term, 0, sizeof(term));
+		term.vtp_vm_id = create.vcp_id;
+		if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
+			warn("VMM_IOC_TERM %s", tc->tc_name);
+			ret = 1;
+		}
 	}
+	return (ret);
+}
+
+int
+main(void)
+{
+	static const struct tlbi_case cases[] = {
+		{ "vae1is", 0 },
+		{ "vaale1is", 1 },
+		{ "aside1is", 2 },
+		{ "vmalle1is", 3 },
+	};
+	struct sigaction sa;
+	int fd, ret = 0;
+	size_t i;
+
+	fd = open(VMM_NODE, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", VMM_NODE);
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = alarm_handler;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGALRM, &sa, NULL) == -1)
+		err(1, "sigaction");
+
+	for (i = 0; i < nitems(cases); i++) {
+		if (run_case(fd, &cases[i]) != 0) {
+			ret = 1;
+			break;
+		}
+	}
+	if (ret == 0)
+		printf("guest stage-1 TLBI families exposed newly executable "
+		    "EL0 pages\n");
 	close(fd);
 	return (ret);
 }

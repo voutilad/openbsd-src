@@ -28,11 +28,33 @@ tlbi_boot_end:
 	.global tlbi_fault_start
 	.global tlbi_fault_end
 tlbi_fault_start:
-	/* Count retries, install the missing L3 entry, then invalidate its VA. */
+	/*
+	 * Count retries and install the missing L3 entry.  x5 selects one of
+	 * the EL1 invalidation families exercised by tlbi.c.  Each case starts
+	 * in a new VM so no invalidation performed by an earlier case can make
+	 * a later one pass accidentally.
+	 */
 	add	x4, x4, #1
 	str	x1, [x0]
 	dsb	ishst
+	cmp	x5, #0
+	b.eq	1f
+	cmp	x5, #1
+	b.eq	2f
+	cmp	x5, #2
+	b.eq	3f
+	tlbi	vmalle1is
+	b	4f
+1:
 	tlbi	vae1is, x2
+	b	4f
+2:
+	tlbi	vaale1is, x2
+	b	4f
+3:
+	/* ASIDE1IS takes the ASID in bits [63:48]; this test uses ASID zero. */
+	tlbi	aside1is, xzr
+4:
 	dsb	ish
 	isb
 	/* A later SVC must use the success vector instead of mapping again. */
