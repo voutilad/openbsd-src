@@ -59,9 +59,6 @@
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 #define VMM_ASYNC_RETRIES	8
 
-/* avr_flush_tlb operation consumed by the EL2 entry assembly. */
-#define VMM_TLBI_VMALLS12E1IS	1
-
 /* Atomic software form of the one interrupt selected by userland. */
 #define VMM_INTR_VALID		(1UL << 63)
 #define VMM_INTR_INTID_MASK	0xffffUL
@@ -945,9 +942,9 @@ vm_run(struct vm_run_params *vrp)
 			splx(recovery_s);
 		fpu_kernel_exit();
 		/*
-		 * EL2 has executed the requested TLBI even if a pending host IRQ
-		 * prevented the guest from retiring an instruction.  Do not repeat
-		 * this expensive operation until a stage-2 mapping changes.
+		 * EL2 has executed any requested combined invalidation even if a
+		 * pending host IRQ prevented the guest from retiring an instruction.
+		 * Do not repeat it until another stage-2 mapping change requires one.
 		 */
 		run->avr_flush_tlb = 0;
 		arm64_vmm_save_run(vcpu);
@@ -960,35 +957,6 @@ vm_run(struct vm_run_params *vrp)
 		 */
 		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
 		    run->avr_exit == ARM64_VMM_EXIT_FIQ) {
-			/*
-			 * AT S12E0R in the asynchronous vector checks the combined
-			 * translation for the interrupted EL0 PC while the guest's
-			 * translation regimes remain selected.  A fault is impossible
-			 * for the instruction the processor was executing: arm64 user
-			 * executable mappings are also readable.  It therefore exposes
-			 * a stale nested shadow left behind after an otherwise-correct
-			 * guest TLBI.
-			 *
-			 * Recover with the one operation which invalidates that outer
-			 * shadow.  First force the final asynchronous save/retry path;
-			 * it protects the potentially long nested VMALLS12E1IS from the
-			 * VHE host timer.  If the combined probe still faults afterward,
-			 * yield with a current EL12 snapshot and request a protected full
-			 * entry on the next ioctl.
-			 */
-			if ((vcpu->vc_regs.vrs_sctlr_el1 & SCTLR_M) != 0 &&
-			    (vcpu->vc_regs.vrs_pstate & PSR_M_MASK) == PSR_M_EL0t &&
-			    run->avr_async_pc == vcpu->vc_regs.vrs_pc &&
-			    (run->avr_async_par & PAR_F) != 0) {
-				run->avr_flush_tlb = VMM_TLBI_VMALLS12E1IS;
-				if (!save_async) {
-					irq_retries = VMM_ASYNC_RETRIES;
-					continue;
-				}
-				vcpu->vc_el12_dirty = 1;
-				vcpu->vc_entry_recovery = 1;
-				break;
-			}
 			/*
 			 * Retry a short, bounded sequence before returning to userland.
 			 * A physical timer can arrive while a nested hypervisor is still

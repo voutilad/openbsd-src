@@ -230,7 +230,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	cbz	x0, .Lvhe_tlb_done
 	/*
 	 * vmm owns this full combined invalidation.  It is required after a
-	 * stage-2 mapping change, vCPU migration, or stale nested-shadow detection.
+	 * stage-2 mapping change or vCPU migration.
 	 * Guest stage-1 TLBIs are never replayed here: they execute through the
 	 * architectural guest path.
 	 */
@@ -664,26 +664,6 @@ ENTRY_NP(vmm_hyp_irq)
 	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
-	/*
-	 * Probe only an interrupted EL0 PC.  AT S12E0R explicitly uses the
-	 * selected guest stage-1 and stage-2 regimes, unlike S1E0R under VHE.
-	 * Preserve the host PAR_EL1 around the probe: it is shared EL2 state,
-	 * while the guest sees its EL12 bank.
-	 */
-	str	xzr, [x17, #AVR_ASYNC_PAR]
-	mrs	x16, elr_el2
-	str	x16, [x17, #AVR_ASYNC_PC]
-	mrs	x16, spsr_el2
-	and	x16, x16, #0xf
-	cbnz	x16, 1f
-	mrs	x18, par_el1
-	ldr	x16, [x17, #AVR_ASYNC_PC]
-	at	s12e0r, x16
-	isb
-	mrs	x16, par_el1
-	str	x16, [x17, #AVR_ASYNC_PAR]
-	msr	par_el1, x18
-1:
 	mov	x16, #ARM64_VMM_EXIT_IRQ
 	str	x16, [x17, #AVR_EXIT]
 	b	.Lguest_exit
@@ -696,21 +676,6 @@ ENTRY_NP(vmm_hyp_fiq)
 	str	x18, [sp, #16]
 	mrs	x17, tpidr_el2
 	cbz	x17, .Lbad_hyp
-	/* Keep the FIQ vector's translation check identical to the IRQ path. */
-	str	xzr, [x17, #AVR_ASYNC_PAR]
-	mrs	x16, elr_el2
-	str	x16, [x17, #AVR_ASYNC_PC]
-	mrs	x16, spsr_el2
-	and	x16, x16, #0xf
-	cbnz	x16, 1f
-	mrs	x18, par_el1
-	ldr	x16, [x17, #AVR_ASYNC_PC]
-	at	s12e0r, x16
-	isb
-	mrs	x16, par_el1
-	str	x16, [x17, #AVR_ASYNC_PAR]
-	msr	par_el1, x18
-1:
 	mov	x16, #ARM64_VMM_EXIT_FIQ
 	str	x16, [x17, #AVR_EXIT]
 	b	.Lguest_exit

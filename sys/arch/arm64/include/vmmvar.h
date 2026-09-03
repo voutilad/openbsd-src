@@ -270,9 +270,6 @@ struct arm64_vmm_run {
 	uint64_t	avr_ich_lr0_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
-	/* Combined translation probe sampled while an EL0 instruction ran. */
-	uint64_t	avr_async_par;
-	uint64_t	avr_async_pc;
 	/* Pending vmm-owned combined stage-1/stage-2 invalidation. */
 	uint64_t	avr_flush_tlb;
 	/* Guest virtual timer bank used directly by a VHE EL1 guest. */
