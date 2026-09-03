@@ -110,8 +110,10 @@ static int	walk_next(struct fdt_walk *, struct fdt_item *);
 static void	uart_puts(u64, const char *);
 
 static volatile u32 guest_intid = GIC_SPURIOUS;
+static volatile u32 guest_hold_spi;
 static volatile u32 guest_uart_data;
 static volatile u32 guest_uart_tx_irq;
+static volatile u64 guest_held_iar;
 static volatile u32 *guest_uart;
 static volatile u32 *guest_dist;
 
@@ -481,14 +483,24 @@ guest_irq(void)
 		write_cntv_ctl(0);
 	else if (guest_intid == TEST_INTID && guest_uart != (void *)0) {
 		/*
-		 * The first hardware-CPU-interface model has one LR but no
-		 * maintenance interrupt with which to report an edge acknowledge
-		 * back to the userland Distributor.  Explicitly clear this synthetic
+		 * The hardware CPU-interface model has no maintenance interrupt with
+		 * which to report an edge acknowledge back to the userland
+		 * Distributor.  Explicitly clear this synthetic
 		 * software-pended edge before EOI, exactly as the test would clear a
 		 * device condition.  Real UART and timer inputs are level lines and
 		 * deassert through their device models.
 		 */
 		guest_dist[GICD_ICPENDR1 / sizeof(u32)] = TEST_INTID_BIT;
+		if (guest_hold_spi == 1) {
+			/*
+			 * Retain this interrupt as active in its List Register.  The
+			 * higher-priority timer PPI programmed below must occupy another
+			 * LR and preempt it without trapping IAR or EOIR to software.
+			 */
+			guest_held_iar = iar;
+			guest_hold_spi = 2;
+			return;
+		}
 		mis = guest_uart[PL011_MIS / sizeof(u32)];
 		if ((mis & PL011_INT_RX) != 0) {
 			guest_uart_data = guest_uart[PL011_DR / sizeof(u32)] & 0xff;
@@ -578,6 +590,33 @@ guest_main(const void *fdt)
 		uart_puts(uart, "arm64 vmd hardware virtual timer PPI works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd timer returned wrong INTID\r\n");
+
+	/*
+	 * Keep SPI 33 active in the virtual CPU interface, then require the
+	 * higher-priority timer PPI to preempt it while ordinary instructions are
+	 * executing.  This covers both a running-vCPU timer expiry and concurrent
+	 * LR state, which the preceding WFI/sequential checks deliberately avoid.
+	 */
+	rpriority[TIMER_INTID] = 0x40;
+	guest_intid = GIC_SPURIOUS;
+	guest_hold_spi = 1;
+	dist[GICD_ISPENDR1 / sizeof(u32)] = TEST_INTID_BIT;
+	while (guest_hold_spi != 2)
+		__asm volatile("wfi" ::: "memory");
+
+	guest_intid = GIC_SPURIOUS;
+	write_cntv_ctl(0);
+	write_cntv_tval(TIMER_TICKS);
+	write_cntv_ctl(1);
+	while (guest_intid == GIC_SPURIOUS)
+		__asm volatile("nop" ::: "memory");
+	if (guest_intid == TIMER_INTID)
+		uart_puts(uart, "arm64 vmd timer preempted an active SPI\r\n");
+	else
+		uart_puts(uart, "arm64 vmd timer preemption returned wrong INTID\r\n");
+	write_icc_eoir1(guest_held_iar);
+	guest_hold_spi = 0;
+	rpriority[TIMER_INTID] = 0x80;
 
 	/* Reconfigure SPI 33 as the level source described for the PL011. */
 	config = dist[(GICD_ICFGR + (TEST_INTID / 16) * sizeof(u32)) /

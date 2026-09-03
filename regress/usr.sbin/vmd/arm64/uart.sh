@@ -108,6 +108,8 @@ grep -q "arm64 vmd FDT + GICv3 SPI interrupt works" "${console}" ||
 	fail "guest did not take, acknowledge, and EOI the FDT-described GICv3 SPI"
 grep -q "arm64 vmd hardware virtual timer PPI works" "${console}" ||
 	fail "guest did not take and clear the FDT-described virtual timer PPI"
+grep -q "arm64 vmd timer preempted an active SPI" "${console}" ||
+	fail "guest timer did not preempt an interrupt active in another LR"
 grep -q "arm64 vmd PL011 TX interrupt works" "${console}" ||
 	fail "guest did not take the PL011 transmit-ready interrupt"
 grep -q "arm64 vmd PL011 RX interrupt works" "${console}" ||
