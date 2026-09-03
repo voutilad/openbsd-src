@@ -79,6 +79,7 @@ static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static int	arm64_vmm_irqcfg(struct vm_irqcfg_params *);
 static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
+static void	arm64_vmm_load_lr(uint64_t *, uint64_t);
 static void	arm64_vmm_load_intr(struct vcpu *);
 static void	arm64_vmm_load_run(struct vcpu *, int);
 static void	arm64_vmm_save_run(struct vcpu *);
@@ -438,6 +439,7 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	memset(run->avr_pauth, 0, sizeof(run->avr_pauth));
 	run->avr_ich_vmcr_el2 = 0;
 	run->avr_ich_lr0_el2 = 0;
+	run->avr_ich_lr1_el2 = 0;
 	run->avr_cntv_ctl_el0 = 0;
 	run->avr_cntv_cval_el0 = 0;
 	run->avr_cntvct_el0 = 0;
@@ -585,62 +587,67 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 }
 
 static void
-arm64_vmm_load_intr(struct vcpu *vcpu)
+arm64_vmm_load_lr(uint64_t *lrp, uint64_t signal)
 {
-	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
-	uint64_t intid, lr, now, signal, state, timer;
+	uint64_t intid, lr, state;
 
 	/*
-	 * LR0 is architectural state, not a level latch which can be overwritten
-	 * on every entry.  In particular, an active LR must retain its INTID until
-	 * the guest executes EOIR.  Userland may lower that device or select a
-	 * different pending interrupt in the meantime; the atomic signal remains
-	 * queued and is installed after hardware reports the LR invalid.
+	 * An LR is architectural state, not a level latch which can be overwritten
+	 * on every entry.  An active LR must retain its INTID until the guest
+	 * executes EOIR.  Its source may lower in the meantime; a different signal
+	 * can only occupy this slot after hardware reports the LR invalid.
 	 *
 	 * A merely pending LR has not been acknowledged and is safe to withdraw or
 	 * replace.  This is what lets a device deassert before IAR without leaving
 	 * a phantom interrupt in the virtual CPU interface.
 	 */
+	lr = *lrp;
+	state = lr & ICH_LR_STATE_MASK;
+	if (state == ICH_LR_ACTIVE ||
+	    state == (ICH_LR_ACTIVE | ICH_LR_PENDING)) {
+		/* Never retain a speculative re-pend after the selected line moved. */
+		*lrp = lr & ~ICH_LR_PENDING;
+		return;
+	}
+	if ((signal & VMM_INTR_VALID) == 0) {
+		*lrp = 0;
+		return;
+	}
+
+	intid = signal & VMM_INTR_INTID_MASK;
+	*lrp = ICH_LR_PENDING | ICH_LR_GROUP1 | intid |
+	    (((signal & VMM_INTR_PRIORITY_MASK) >> VMM_INTR_PRIORITY_SHIFT) <<
+	    ICH_LR_PRIORITY_SHIFT);
+}
+
+static void
+arm64_vmm_load_intr(struct vcpu *vcpu)
+{
+	struct arm64_vmm_run *run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	uint64_t now, signal, timer;
+
+	/* LR0 is the interrupt selected by vmd's userland device model. */
 	signal = READ_ONCE(vcpu->vc_intr);
+	arm64_vmm_load_lr(&run->avr_ich_lr0_el2, signal);
+
 	/*
 	 * A VHE guest programs CNTV_* directly.  Existing host clock exits sample
 	 * that bank often enough for a running vCPU; a trapped WFI is woken at the
 	 * exact deadline by vmd.  Compare in the host counter domain established
-	 * when the timer state was saved, then merge the timer PPI with the best
-	 * userland device using normal GIC priority and INTID tie breaking.
+	 * when the timer state was saved.  LR1 remains independent of LR0 so the
+	 * hardware CPU interface can apply priority and preemption while either
+	 * interrupt is active.
 	 */
 	timer = READ_ONCE(vcpu->vc_timer_intr);
 	if ((timer & VMM_INTR_VALID) != 0 &&
 	    (vcpu->vc_timer_ctl &
 	    (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE) {
 		now = READ_SPECIALREG(cntvct_el0);
-		if ((int64_t)(now - vcpu->vc_timer_deadline) >= 0 &&
-		    ((signal & VMM_INTR_VALID) == 0 ||
-		    (timer & VMM_INTR_PRIORITY_MASK) <
-		    (signal & VMM_INTR_PRIORITY_MASK) ||
-		    ((timer & VMM_INTR_PRIORITY_MASK) ==
-		    (signal & VMM_INTR_PRIORITY_MASK) &&
-		    (timer & VMM_INTR_INTID_MASK) <
-		    (signal & VMM_INTR_INTID_MASK))))
-			signal = timer;
-	}
-	lr = run->avr_ich_lr0_el2;
-	state = lr & ICH_LR_STATE_MASK;
-	if (state == ICH_LR_ACTIVE ||
-	    state == (ICH_LR_ACTIVE | ICH_LR_PENDING)) {
-		/* Never retain a speculative re-pend after the selected line moved. */
-		run->avr_ich_lr0_el2 = lr & ~ICH_LR_PENDING;
-		return;
-	}
-	if ((signal & VMM_INTR_VALID) == 0) {
-		run->avr_ich_lr0_el2 = 0;
-		return;
-	}
-
-	intid = signal & VMM_INTR_INTID_MASK;
-	run->avr_ich_lr0_el2 = ICH_LR_PENDING | ICH_LR_GROUP1 | intid |
-	    (((signal & VMM_INTR_PRIORITY_MASK) >> VMM_INTR_PRIORITY_SHIFT) <<
-	    ICH_LR_PRIORITY_SHIFT);
+		if ((int64_t)(now - vcpu->vc_timer_deadline) < 0)
+			timer = 0;
+	} else
+		timer = 0;
+	arm64_vmm_load_lr(&run->avr_ich_lr1_el2, timer);
 }
 
 static void

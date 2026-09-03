@@ -241,9 +241,10 @@ gicv3_running_priority_locked(void)
  * first model has one vCPU, so a zero IROUTER affinity is its only route.
  * Binary-point, PMR, group-enable, and running-priority policy is absent from
  * this predicate because the hardware virtual CPU interface applies it.  The
- * current one-LR backend queues only the best userland candidate; a later
- * multi-LR extension can publish more candidates without changing the MMIO
- * model or moving instruction emulation into the kernel.
+ * current one-userland-LR backend queues only the best device candidate;
+ * vmm(4) reserves a separate LR for the architectural timer.  A later
+ * multi-device-LR extension can publish more candidates without changing the
+ * MMIO model or moving instruction emulation into the kernel.
  */
 static int
 gicv3_candidate_locked(void)
@@ -275,11 +276,11 @@ gicv3_candidate_locked(void)
 }
 
 /*
- * Publish the best Distributor/Redistributor candidate to vmm(4)'s one
- * identity- and priority-qualified hardware LR.  Device state remains in
- * userland.  In particular, level devices lower their input after the guest
- * services them, causing this routine to withdraw the candidate or select the
- * next one.
+ * Publish the best Distributor/Redistributor device candidate to vmm(4)'s
+ * userland LR.  Device state remains in userland.  In particular, level
+ * devices lower their input after the guest services them, causing this
+ * routine to withdraw the candidate or select the next one.  The timer PPI is
+ * configured above but delivered independently by vmm(4)'s timer LR.
  */
 static int
 gicv3_drive_locked(void)

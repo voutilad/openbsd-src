@@ -266,8 +266,9 @@ struct arm64_vmm_run {
 	uint64_t	avr_ich_hcr_el2;
 	/* Guest virtual CPU-interface state retained across exits. */
 	uint64_t	avr_ich_vmcr_el2;
-	/* One hardware List Register carrying guest interrupt identity and state. */
+	/* LR0 carries userland devices; LR1 is reserved for the virtual timer. */
 	uint64_t	avr_ich_lr0_el2;
+	uint64_t	avr_ich_lr1_el2;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
 	/* Pending vmm-owned combined stage-1/stage-2 invalidation. */
@@ -316,6 +317,7 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_ich_hcr_el2;
 	uint64_t	avr_host_ich_vmcr_el2;
 	uint64_t	avr_host_ich_lr0_el2;
+	uint64_t	avr_host_ich_lr1_el2;
 	/* Pointer-authentication keys are shared hardware state. */
 	uint64_t	avr_host_pauth[10] __aligned(16);
 };

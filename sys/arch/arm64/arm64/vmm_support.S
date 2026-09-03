@@ -151,6 +151,8 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_ICH_VMCR_EL2]
 	mrs	x0, ICH_LR0_EL2
 	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
+	mrs	x0, ICH_LR1_EL2
+	str	x0, [x17, #AVR_HOST_ICH_LR1_EL2]
 	/*
 	 * API/APK let the guest execute pointer-authentication instructions and
 	 * write the key registers directly.  The keys are not banked, so save the
@@ -192,14 +194,16 @@ ENTRY(arm64_vmm_enter_vhe)
 .Lvhe_stage2_ready:
 	/*
 	 * Install the guest's hardware CPU-interface state while it is disabled.
-	 * LR0 carries the real INTID, priority, and pending/active lifecycle, so
-	 * guest IAR and EOIR instructions complete without trapping to software.
+	 * The LRs carry each real INTID, priority, and pending/active lifecycle,
+	 * so guest IAR and EOIR instructions complete without trapping to software.
 	 */
 	msr	ICH_HCR_EL2, xzr
 	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
 	msr	ICH_VMCR_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_LR0_EL2]
 	msr	ICH_LR0_EL2, x0
+	ldr	x0, [x17, #AVR_ICH_LR1_EL2]
+	msr	ICH_LR1_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 
@@ -492,6 +496,8 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_ICH_VMCR_EL2]
 	mrs	x0, ICH_LR0_EL2
 	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
+	mrs	x0, ICH_LR1_EL2
+	str	x0, [x17, #AVR_HOST_ICH_LR1_EL2]
 	/* Save the nVHE host's five 128-bit pointer-authentication keys. */
 	add	x16, x17, #AVR_HOST_PAUTH
 	mrs	x0, apiakeylo_el1
@@ -515,12 +521,14 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	vttbr_el2, x0
 	ldr	x0, [x17, #AVR_VTCR_EL2]
 	msr	vtcr_el2, x0
-	/* See the VHE path: LR0 carries identity and its hardware lifecycle. */
+	/* See the VHE path: the LRs carry identity and hardware lifecycle. */
 	msr	ICH_HCR_EL2, xzr
 	ldr	x0, [x17, #AVR_ICH_VMCR_EL2]
 	msr	ICH_VMCR_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_LR0_EL2]
 	msr	ICH_LR0_EL2, x0
+	ldr	x0, [x17, #AVR_ICH_LR1_EL2]
+	msr	ICH_LR1_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
@@ -882,14 +890,16 @@ END(vmm_hyp_serror)
 	isb
 .Lsave_guest_timer_done:
 	/*
-	 * VMCR retains PMR, BPR, and group enable.  LR0 may have moved from
+	 * VMCR retains PMR, BPR, and group enable.  Either LR may have moved from
 	 * pending to active or invalid when the guest executed IAR/EOIR, so capture
-	 * both before restoring the host virtual CPU interface.
+	 * all three registers before restoring the host virtual CPU interface.
 	 */
 	mrs	x0, ICH_VMCR_EL2
 	str	x0, [x18, #AVR_ICH_VMCR_EL2]
 	mrs	x0, ICH_LR0_EL2
 	str	x0, [x18, #AVR_ICH_LR0_EL2]
+	mrs	x0, ICH_LR1_EL2
+	str	x0, [x18, #AVR_ICH_LR1_EL2]
 	/* Capture the EL2 syndrome after all guest-visible EL1 state is safe. */
 	mrs	x0, esr_el2
 	str	x0, [x18, #AVR_ESR_EL2]
@@ -956,6 +966,8 @@ END(vmm_hyp_serror)
 	msr	ICH_VMCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_LR0_EL2]
 	msr	ICH_LR0_EL2, x0
+	ldr	x0, [x18, #AVR_HOST_ICH_LR1_EL2]
+	msr	ICH_LR1_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
@@ -1025,6 +1037,8 @@ END(vmm_hyp_serror)
 	msr	ICH_VMCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_LR0_EL2]
 	msr	ICH_LR0_EL2, x0
+	ldr	x0, [x18, #AVR_HOST_ICH_LR1_EL2]
+	msr	ICH_LR1_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]

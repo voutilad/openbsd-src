@@ -97,6 +97,7 @@
 #define	ICH_VMCR_VENG1		(1UL << 1)
 
 #define	ICH_LR0_EL2		s3_4_c12_c12_0
+#define	ICH_LR1_EL2		s3_4_c12_c12_1
 #define	ICH_LR_VINTID_MASK	0xffffffffUL
 #define	ICH_LR_PRIORITY_SHIFT	48
 #define	ICH_LR_PRIORITY_MASK	(0xffUL << ICH_LR_PRIORITY_SHIFT)

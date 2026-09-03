@@ -124,6 +124,7 @@ member	avr_hcr_el2
 member	avr_ich_hcr_el2
 member	avr_ich_vmcr_el2
 member	avr_ich_lr0_el2
+member	avr_ich_lr1_el2
 member	avr_mode
 member	avr_exit
 member	avr_flush_tlb
@@ -163,4 +164,5 @@ member	avr_host_hcr_el2
 member	avr_host_ich_hcr_el2
 member	avr_host_ich_vmcr_el2
 member	avr_host_ich_lr0_el2
+member	avr_host_ich_lr1_el2
 member	avr_host_pauth
