@@ -521,7 +521,7 @@ guest_main(const void *fdt)
 	volatile u8 *priority, *rpriority;
 	volatile u32 *dist, *redist;
 	volatile u64 *router;
-	u32 config, waker;
+	u32 config, i, waker;
 	u64 uart;
 
 	uart = find_uart(fdt);
@@ -590,6 +590,26 @@ guest_main(const void *fdt)
 		uart_puts(uart, "arm64 vmd hardware virtual timer PPI works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd timer returned wrong INTID\r\n");
+
+	/*
+	 * Re-arm through trapped WFI often enough to catch a lost wakeup or stale
+	 * active LR.  A real kernel uses this sequence continuously for clock and
+	 * sleep timeouts, rather than programming the timer only once at boot.
+	 */
+	for (i = 0; i < 32; i++) {
+		guest_intid = GIC_SPURIOUS;
+		write_cntv_ctl(0);
+		write_cntv_tval(TIMER_TICKS);
+		write_cntv_ctl(1);
+		while (guest_intid == GIC_SPURIOUS)
+			__asm volatile("wfi" ::: "memory");
+		if (guest_intid != TIMER_INTID)
+			break;
+	}
+	if (i == 32)
+		uart_puts(uart, "arm64 vmd repeated timer wakeups work\r\n");
+	else
+		uart_puts(uart, "arm64 vmd repeated timer wakeup failed\r\n");
 
 	/*
 	 * Keep SPI 33 active in the virtual CPU interface, then require the
