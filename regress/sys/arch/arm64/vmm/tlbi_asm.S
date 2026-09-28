@@ -28,8 +28,11 @@ tlbi_boot_end:
 	.global tlbi_fault_start
 	.global tlbi_fault_end
 tlbi_fault_start:
+	/* Model the paired kernel/user ASIDs used by the OpenBSD trampoline. */
+	msr	ttbr1_el1, x8
+	isb
 	/*
-	 * Count retries and install the missing L3 entry.  x5 selects one of
+	 * Count retries and install the missing table or leaf.  x5 selects one of
 	 * the EL1 invalidation families exercised by tlbi.c.  Each case starts
 	 * in a new VM so no invalidation performed by an earlier case can make
 	 * a later one pass accidentally.
@@ -52,13 +55,16 @@ tlbi_fault_start:
 	tlbi	vaale1is, x2
 	b	4f
 3:
-	/* ASIDE1IS takes the ASID in bits [63:48]; this test uses ASID zero. */
-	tlbi	aside1is, xzr
+	/* ASIDE1IS takes only the ASID in bits [63:48]. */
+	lsr	x6, x2, #48
+	lsl	x6, x6, #48
+	tlbi	aside1is, x6
 4:
 	dsb	ish
 	isb
 	/* A later SVC must use the success vector instead of mapping again. */
 	msr	vbar_el1, x3
+	msr	ttbr1_el1, x7
 	isb
 	eret
 tlbi_fault_end:

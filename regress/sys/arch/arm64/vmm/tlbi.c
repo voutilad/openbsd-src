@@ -44,6 +44,8 @@
 #define L2_PA		0x5000UL
 #define L3_PA		0x6000UL
 #define TARGET_VA	0x100000UL
+#define TARGET_L2_VA	0x300000UL
+#define TARGET_L3_PA	0x7000UL
 
 #define VECTOR_LOWER_SYNC	0x400UL
 #define PTE_VALID		(1ULL << 0)
@@ -51,6 +53,7 @@
 #define PTE_AP_USER		(1ULL << 6)
 #define PTE_SH_INNER		(3ULL << 8)
 #define PTE_AF			(1ULL << 10)
+#define PTE_NG			(1ULL << 11)
 #define PTE_PAGE_KERNEL		(PTE_VALID | PTE_TABLE | PTE_SH_INNER | PTE_AF)
 #define PTE_PAGE_USER		(PTE_PAGE_KERNEL | PTE_AP_USER)
 
@@ -68,6 +71,9 @@ static volatile sig_atomic_t alarm_fired;
 struct tlbi_case {
 	const char	*tc_name;
 	uint64_t	 tc_selector;
+	uint64_t	 tc_asid;
+	int		 tc_a1;
+	int		 tc_l2;
 };
 
 static void
@@ -109,7 +115,7 @@ run_case(int fd, const struct tlbi_case *tc)
 	struct vm_sharemem_params share;
 	struct vm_terminate_params term;
 	uint64_t *l1, *l2, *l3;
-	uint64_t target_pte;
+	uint64_t target_pte, target_va;
 	char *mem;
 	int created = 0, error, i, ret = 1;
 
@@ -152,8 +158,19 @@ run_case(int fd, const struct tlbi_case *tc)
 	/* Identity-map bootstrap, both vector pages, and the page tables. */
 	for (i = 0; i <= 6; i++)
 		l3[i] = (uint64_t)i * PAGE_SIZE | PTE_PAGE_KERNEL;
-	target_pte = TARGET_PA | PTE_PAGE_USER;
-	/* l3[TARGET_VA >> 12] deliberately remains invalid initially. */
+	target_pte = TARGET_PA | PTE_PAGE_USER | PTE_NG;
+	target_va = tc->tc_l2 ? TARGET_L2_VA : TARGET_VA;
+	if (tc->tc_l2) {
+		uint64_t *target_l3 = (uint64_t *)(mem + TARGET_L3_PA);
+		l3[7] = TARGET_L3_PA | PTE_PAGE_KERNEL;
+		target_l3[(target_va >> 12) & 511] = target_pte;
+		target_pte = TARGET_L3_PA | PTE_VALID | PTE_TABLE;
+	}
+	/*
+	 * Leave either the target leaf or its L2 table descriptor invalid.
+	 * Fault repair must invalidate intermediate walk-cache entries as well
+	 * as final translations.  nG makes the target's ASID significant.
+	 */
 	__builtin___clear_cache(mem, mem + GUEST_MEM_SIZE);
 
 	memset(&reset, 0, sizeof(reset));
@@ -161,21 +178,34 @@ run_case(int fd, const struct tlbi_case *tc)
 	reset.vrp_init_state.vrs_pc = BOOT_PA;
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
-	reset.vrp_init_state.vrs_elr_el1 = TARGET_VA;
+	reset.vrp_init_state.vrs_elr_el1 = target_va;
 	reset.vrp_init_state.vrs_spsr_el1 = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL0t;
 	reset.vrp_init_state.vrs_sctlr_el1 = SCTLR_RES1 | SCTLR_M |
 	    SCTLR_C | SCTLR_I;
-	reset.vrp_init_state.vrs_tcr_el1 = TEST_TCR;
+	reset.vrp_init_state.vrs_tcr_el1 = TEST_TCR |
+	    (tc->tc_a1 ? TCR_A1 : 0);
 	reset.vrp_init_state.vrs_ttbr0_el1 = L1_PA;
+	/* TCR.A1 selects the ASID, independently of the VA's translation base. */
+	if (tc->tc_a1)
+		reset.vrp_init_state.vrs_ttbr1_el1 = tc->tc_asid << 48;
+	else
+		reset.vrp_init_state.vrs_ttbr0_el1 |= tc->tc_asid << 48;
 	reset.vrp_init_state.vrs_mair_el1 = 0xff;
 	reset.vrp_init_state.vrs_vbar_el1 = VECTOR1_PA;
-	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X0] = L3_PA +
-	    ((TARGET_VA >> 12) & 0x1ff) * sizeof(uint64_t);
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X0] = tc->tc_l2 ?
+	    L2_PA + ((target_va >> 21) & 511) * sizeof(uint64_t) :
+	    L3_PA + ((target_va >> 12) & 511) * sizeof(uint64_t);
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X1] = target_pte;
-	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X2] = TARGET_VA >> 12;
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X2] =
+	    (tc->tc_asid << 48) | (target_va >> 12);
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X3] = VECTOR2_PA;
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X5] = tc->tc_selector;
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X7] =
+	    reset.vrp_init_state.vrs_ttbr1_el1;
+	/* The handler switches to the even ASID before invalidating the odd one. */
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X8] =
+	    reset.vrp_init_state.vrs_ttbr1_el1 & ~(1ULL << 48);
 	if (ioctl(fd, VMM_IOC_RESETCPU, &reset) == -1) {
 		warn("VMM_IOC_RESETCPU");
 		goto out;
@@ -227,10 +257,22 @@ int
 main(void)
 {
 	static const struct tlbi_case cases[] = {
-		{ "vae1is", 0 },
-		{ "vaale1is", 1 },
-		{ "aside1is", 2 },
-		{ "vmalle1is", 3 },
+		{ "vae1is", 0, 0, 0, 0 },
+		{ "vaale1is", 1, 0, 0, 0 },
+		{ "aside1is", 2, 0, 0, 0 },
+		{ "vmalle1is", 3, 0, 0, 0 },
+		{ "vae1is-asid", 0, 0x9b, 0, 0 },
+		{ "vaale1is-asid", 1, 0x9b, 0, 0 },
+		{ "aside1is-asid", 2, 0x9b, 0, 0 },
+		{ "vmalle1is-asid", 3, 0x9b, 0, 0 },
+		{ "vae1is-a1", 0, 0x9b, 1, 0 },
+		{ "vaale1is-a1", 1, 0x9b, 1, 0 },
+		{ "aside1is-a1", 2, 0x9b, 1, 0 },
+		{ "vmalle1is-a1", 3, 0x9b, 1, 0 },
+		{ "vae1is-l2", 0, 0x9b, 1, 1 },
+		{ "vaale1is-l2", 1, 0x9b, 1, 1 },
+		{ "aside1is-l2", 2, 0x9b, 1, 1 },
+		{ "vmalle1is-l2", 3, 0x9b, 1, 1 },
 	};
 	struct sigaction sa;
 	int fd, ret = 0;
