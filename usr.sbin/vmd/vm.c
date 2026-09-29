@@ -1189,6 +1189,10 @@ vcpu_intr(int fd, uint32_t vcpu_id, uint8_t intr)
 
 	vip.vip_vcpu_id = vcpu_id; /* XXX always 0? */
 	vip.vip_intr = intr;
+#ifdef __aarch64__
+	/* Pause/shutdown kicks must not withdraw an asserted device interrupt. */
+	vip.vip_level = VMM_INTR_LEVEL_KICK;
+#endif
 
 	if (ioctl(fd, VMM_IOC_INTR, &vip) == -1)
 		return (errno);

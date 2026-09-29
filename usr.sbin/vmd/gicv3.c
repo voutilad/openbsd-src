@@ -106,7 +106,7 @@
 struct gicv3_dev {
 	/* MMIO, ICC exits, and IRQ callbacks can run on different threads. */
 	pthread_mutex_t	 gd_mtx;
-	uint32_t	 gd_vm_id;
+	int		 gd_vm_fd;
 
 	/* Distributor and per-INTID architectural state. */
 	uint32_t	 gd_ctlr;
@@ -159,10 +159,10 @@ gicv3_word(int intid)
 }
 
 void
-gicv3_init(uint32_t vm_id)
+gicv3_init(int vm_fd)
 {
 	mutex_lock(&gicv3.gd_mtx);
-	gicv3.gd_vm_id = vm_id;
+	gicv3.gd_vm_fd = vm_fd;
 	/* DS advertises the deliberately simple single-security-state model. */
 	gicv3.gd_ctlr = GICD_CTLR_DS;
 	memset(gicv3.gd_group, 0, sizeof(gicv3.gd_group));
@@ -207,7 +207,7 @@ gicv3_timer_config_locked(void)
 	    gicv3.gd_timer_priority))
 		return (0);
 
-	error = arm64_vcpu_irqcfg(gicv3.gd_vm_id, 0, ARM64_TIMER_INTID,
+	error = arm64_vcpu_irqcfg(gicv3.gd_vm_fd, 0, ARM64_TIMER_INTID,
 	    gicv3.gd_priority[ARM64_TIMER_INTID], enabled);
 	if (error != 0)
 		return (error);
@@ -296,10 +296,10 @@ gicv3_drive_locked(void)
 	    gicv3.gd_priority[intid] == gicv3.gd_irq_priority))
 		return (0);
 	if (intid == GICV3_SPURIOUS)
-		error = arm64_vcpu_intr(gicv3.gd_vm_id, 0, 0, 0,
+		error = arm64_vcpu_intr(gicv3.gd_vm_fd, 0, 0, 0,
 		    VMM_INTR_LEVEL_LOW);
 	else
-		error = arm64_vcpu_intr(gicv3.gd_vm_id, 0, intid,
+		error = arm64_vcpu_intr(gicv3.gd_vm_fd, 0, intid,
 		    gicv3.gd_priority[intid], VMM_INTR_LEVEL_HIGH);
 	if (error != 0)
 		return (error);
@@ -349,12 +349,12 @@ gicv3_is_edge_locked(int intid)
 }
 
 int
-gicv3_set_irq(uint32_t vm_id, uint32_t vcpu_id, int intid, int asserted)
+gicv3_set_irq(int vm_fd, uint32_t vcpu_id, int intid, int asserted)
 {
 	uint32_t bit;
 	int error, word;
 
-	if (vm_id != gicv3.gd_vm_id || vcpu_id != 0 ||
+	if (vm_fd != gicv3.gd_vm_fd || vcpu_id != 0 ||
 	    intid < 0 || intid >= GICV3_NINTIDS)
 		return (EINVAL);
 	word = gicv3_word(intid);

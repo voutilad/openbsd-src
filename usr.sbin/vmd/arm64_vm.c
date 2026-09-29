@@ -50,7 +50,6 @@
 #define ARM64_KERNEL_ALIGN	(2UL * 1024 * 1024)
 #define ARM64_KERNEL_WINDOW	(64UL * 1024 * 1024)
 
-extern struct vmd	*env;
 extern struct vmd_vm	*current_vm;
 extern int		 con_fd;
 
@@ -288,16 +287,16 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 	(void)child_disks;
 	(void)child_taps;
 
-	/* Keep this first backend honest: it has only a GIC and polling PL011. */
+	/* Keep this first backend honest: it has only a GIC, timer and PL011. */
 	if (vm->vm_params.vmc_ndisks != 0 ||
 	    vm->vm_params.vmc_nnics != 0 || vm->vm_cdrom != -1) {
 		log_warnx("arm64 guests do not yet support storage or network "
 		    "devices");
 		return (EOPNOTSUPP);
 	}
-	gicv3_init(vm->vm_vmmid);
-	arm64_timer_init(vm->vm_vmmid);
-	pl011_init(con_fd, vm->vm_vmmid);
+	gicv3_init(vm->vm_fd);
+	arm64_timer_init(vm->vm_fd);
+	pl011_init(con_fd, vm->vm_fd);
 	return (0);
 }
 
@@ -385,18 +384,17 @@ read_mem(paddr_t src, void *buf, size_t len)
  * while IAR and EOIR execute directly against an EL2 List Register.
  */
 int
-arm64_vcpu_intr(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
+arm64_vcpu_intr(int vm_fd, uint32_t vcpu_id, uint16_t intid,
     uint8_t priority, int asserted)
 {
 	struct vm_intr_params vip;
 
 	memset(&vip, 0, sizeof(vip));
-	vip.vip_vm_id = vm_id;
 	vip.vip_vcpu_id = vcpu_id;
 	vip.vip_intr = intid;
 	vip.vip_priority = priority;
 	vip.vip_level = asserted ? VMM_INTR_LEVEL_HIGH : VMM_INTR_LEVEL_LOW;
-	if (ioctl(env->vmd_vmm_fd, VMM_IOC_INTR, &vip) == -1)
+	if (ioctl(vm_fd, VMM_IOC_INTR, &vip) == -1)
 		return (errno);
 	return (0);
 }
@@ -407,19 +405,18 @@ arm64_vcpu_intr(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
  * the ioctl does not expose or alter the guest's timer registers.
  */
 int
-arm64_vcpu_irqcfg(uint32_t vm_id, uint32_t vcpu_id, uint16_t intid,
+arm64_vcpu_irqcfg(int vm_fd, uint32_t vcpu_id, uint16_t intid,
     uint8_t priority, int enabled)
 {
 	struct vm_irqcfg_params viq;
 
 	memset(&viq, 0, sizeof(viq));
-	viq.viq_vm_id = vm_id;
 	viq.viq_vcpu_id = vcpu_id;
 	viq.viq_intr = intid;
 	viq.viq_priority = priority;
 	if (enabled)
 		viq.viq_flags = VMM_IRQCFG_ENABLED;
-	if (ioctl(env->vmd_vmm_fd, VMM_IOC_IRQCFG, &viq) == -1)
+	if (ioctl(vm_fd, VMM_IOC_IRQCFG, &viq) == -1)
 		return (errno);
 	return (0);
 }
@@ -445,28 +442,29 @@ int
 intr_ack(int vcpu_id)
 {
 	/* The hardware virtual CPU interface completes ICC_IAR1_EL1. */
-	(void)vm;
-	return (-1);
+	(void)vcpu_id;
+	return (0xffff);
 }
 
 void
 vcpu_assert_vector(int fd, uint32_t vcpu_id, uint8_t vector)
 {
-	if (gicv3_set_irq(vm_id, vcpu_id, irq, 1) != 0)
+	/* MSI/vector routing has not been implemented for this platform. */
+	fatalx("%s: unimplemented", __func__);
+}
+
+void
+vcpu_assert_irq(int fd, uint32_t vcpu_id, int irq)
+{
+	if (gicv3_set_irq(fd, vcpu_id, irq, 1) != 0)
 		log_warnx("failed to assert GICv3 INTID %d", irq);
 }
 
 void
-vcpu_assert_irq(int fd, uint32_t vcpu_id, int vector)
+vcpu_deassert_irq(int fd, uint32_t vcpu_id, int irq)
 {
-	if (gicv3_set_irq(vm_id, vcpu_id, irq, 0) != 0)
+	if (gicv3_set_irq(fd, vcpu_id, irq, 0) != 0)
 		log_warnx("failed to deassert GICv3 INTID %d", irq);
-}
-
-void
-vcpu_deassert_irq(int fd, uint32_t vcpu_id, int vector)
-{
-	fatalx("%s: unimplemented", __func__);
 }
 
 int
@@ -492,7 +490,7 @@ vcpu_exit(struct vm_run_params *vrp)
 			return (EFAULT);
 		}
 	case VM_EXIT_HVC:
-		vcpu_halt(vrp->vrp_vcpu_id);
+		vcpu_halt(vrp->vrp_vcpu_id, 1);
 		return (0);
 	case VM_EXIT_WFX:
 		/*
@@ -503,7 +501,7 @@ vcpu_exit(struct vm_run_params *vrp)
 		 * again after the interrupt source has been cleared.
 		 */
 		vrp->vrp_exit->vrs.vrs_pc += sizeof(uint32_t);
-		vcpu_halt(vrp->vrp_vcpu_id);
+		vcpu_halt(vrp->vrp_vcpu_id, 1);
 		arm64_timer_wfi(vrp->vrp_exit);
 		gicv3_wfi(vrp->vrp_vcpu_id);
 		return (0);

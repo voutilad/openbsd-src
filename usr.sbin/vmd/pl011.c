@@ -51,7 +51,7 @@
 struct pl011_dev {
 	pthread_mutex_t	 pd_mtx;
 	int		 pd_fd;
-	uint32_t	 pd_vm_id;
+	int		 pd_vm_fd;
 	uint32_t	 pd_regs[(PL011_REG_LAST / sizeof(uint32_t)) + 1];
 	uint16_t	 pd_rx_data;
 	uint32_t	 pd_ris;
@@ -82,7 +82,7 @@ pl011_drive_locked(void)
 	irq_line = mis != 0;
 	if (irq_line == pl011.pd_irq_line)
 		return (0);
-	if (gicv3_set_irq(pl011.pd_vm_id, 0, ARM64_UART_INTID,
+	if (gicv3_set_irq(pl011.pd_vm_fd, 0, ARM64_UART_INTID,
 	    irq_line) != 0)
 		return (EIO);
 	pl011.pd_irq_line = irq_line;
@@ -177,7 +177,7 @@ pl011_rcv_event(int fd, short kind, void *arg)
 }
 
 void
-pl011_init(int fd, uint32_t vm_id)
+pl011_init(int fd, int vm_fd)
 {
 	int error;
 
@@ -188,7 +188,7 @@ pl011_init(int fd, uint32_t vm_id)
 		fatal("could not initialize PL011 mutex");
 	}
 	pl011.pd_fd = fd;
-	pl011.pd_vm_id = vm_id;
+	pl011.pd_vm_fd = vm_fd;
 	event_set(&pl011.pd_event, fd, EV_READ | EV_PERSIST,
 	    pl011_rcv_event, NULL);
 	event_set(&pl011.pd_wake, fd, EV_WRITE, pl011_rcv_event, NULL);

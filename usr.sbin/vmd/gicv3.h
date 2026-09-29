@@ -18,10 +18,10 @@
 #ifndef _VMD_GICV3_H_
 #define _VMD_GICV3_H_
 
-void	gicv3_init(uint32_t);
+void	gicv3_init(int);
 int	gicv3_mmio(paddr_t, size_t, int, uint64_t *);
 int	gicv3_icc(uint64_t, int, uint64_t *);
-int	gicv3_set_irq(uint32_t, uint32_t, int, int);
+int	gicv3_set_irq(int, uint32_t, int, int);
 void	gicv3_wfi(uint32_t);
 
 #endif /* _VMD_GICV3_H_ */

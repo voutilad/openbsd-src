@@ -23,7 +23,7 @@
 
 struct vm_exit;
 
-void	arm64_timer_init(uint32_t);
+void	arm64_timer_init(int);
 void	arm64_timer_pause(void);
 void	arm64_timer_unpause(void);
 void	arm64_timer_wfi(const struct vm_exit *);

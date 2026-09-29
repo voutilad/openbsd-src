@@ -34,7 +34,7 @@
 
 struct arm64_timer_dev {
 	pthread_mutex_t	 td_mtx;
-	uint32_t	 td_vm_id;
+	int		 td_vm_fd;
 	uint32_t	 td_ctl;
 	struct timespec	 td_deadline;
 	int		 td_deadline_valid;
@@ -80,7 +80,7 @@ arm64_timer_refresh_locked(void)
 	    arm64_timer.td_expired;
 	if (irq_line == arm64_timer.td_irq_line)
 		return (0);
-	if (gicv3_set_irq(arm64_timer.td_vm_id, 0, ARM64_TIMER_INTID,
+	if (gicv3_set_irq(arm64_timer.td_vm_fd, 0, ARM64_TIMER_INTID,
 	    irq_line) != 0)
 		return (EIO);
 	arm64_timer.td_irq_line = irq_line;
@@ -188,7 +188,7 @@ arm64_timer_pipe_dispatch(int fd, short event, void *arg)
 }
 
 void
-arm64_timer_init(uint32_t vm_id)
+arm64_timer_init(int vm_fd)
 {
 	int error;
 
@@ -198,7 +198,7 @@ arm64_timer_init(uint32_t vm_id)
 		errno = error;
 		fatal("could not initialize arm64 timer mutex");
 	}
-	arm64_timer.td_vm_id = vm_id;
+	arm64_timer.td_vm_fd = vm_fd;
 	evtimer_set(&arm64_timer.td_event, arm64_timer_fire, NULL);
 	vm_pipe_init(&arm64_timer.td_pipe, arm64_timer_pipe_dispatch);
 	event_add(&arm64_timer.td_pipe.read_ev, NULL);
@@ -244,7 +244,7 @@ arm64_timer_wfi(const struct vm_exit *exit)
 	arm64_timer.td_hardware = 1;
 	if (arm64_timer.td_irq_line) {
 		/* Withdraw a line left by the nVHE software fallback, if any. */
-		if (gicv3_set_irq(arm64_timer.td_vm_id, 0,
+		if (gicv3_set_irq(arm64_timer.td_vm_fd, 0,
 		    ARM64_TIMER_INTID, 0) != 0)
 			log_warnx("failed to lower fallback arm64 timer interrupt");
 		arm64_timer.td_irq_line = 0;
