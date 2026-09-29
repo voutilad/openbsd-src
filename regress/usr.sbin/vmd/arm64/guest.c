@@ -113,6 +113,10 @@ static volatile u32 guest_intid = GIC_SPURIOUS;
 static volatile u32 guest_hold_spi;
 static volatile u32 guest_uart_data;
 static volatile u32 guest_uart_tx_irq;
+static volatile u32 guest_uart_burst;
+static volatile u32 guest_uart_count;
+static volatile u32 guest_uart_bad;
+static const char guest_uart_expected[] = "i\rhostname\rpassword\r";
 static volatile u64 guest_held_iar;
 static volatile u32 *guest_uart;
 static volatile u32 *guest_dist;
@@ -504,6 +508,13 @@ guest_irq(void)
 		mis = guest_uart[PL011_MIS / sizeof(u32)];
 		if ((mis & PL011_INT_RX) != 0) {
 			guest_uart_data = guest_uart[PL011_DR / sizeof(u32)] & 0xff;
+			if (guest_uart_burst) {
+				if (guest_uart_count >= sizeof(guest_uart_expected) - 1 ||
+				    guest_uart_data !=
+				    (u8)guest_uart_expected[guest_uart_count])
+					guest_uart_bad = 1;
+				guest_uart_count++;
+			}
 			guest_uart[PL011_ICR / sizeof(u32)] = PL011_INT_RX;
 		}
 		if ((mis & PL011_INT_TX) != 0) {
@@ -665,4 +676,22 @@ guest_main(const void *fdt)
 		uart_puts(uart, "arm64 vmd PL011 RX interrupt works\r\n");
 	else
 		uart_puts(uart, "arm64 vmd PL011 received wrong byte\r\n");
+
+	/*
+	 * A single host write must survive the one-byte receive register's
+	 * repeated drain/rearm/interrupt cycle, including carriage returns.
+	 * This exercises the same input shape as an automated installer.
+	 */
+	guest_uart_count = 0;
+	guest_uart_bad = 0;
+	guest_uart_burst = 1;
+	guest_uart[PL011_IMSC / sizeof(u32)] = PL011_INT_RX;
+	uart_puts(uart, "arm64 vmd waiting for PL011 burst\r\n");
+	while (guest_uart_count < sizeof(guest_uart_expected) - 1)
+		__asm volatile("wfi" ::: "memory");
+	guest_uart[PL011_IMSC / sizeof(u32)] = 0;
+	if (!guest_uart_bad)
+		uart_puts(uart, "arm64 vmd PL011 RX burst works\r\n");
+	else
+		uart_puts(uart, "arm64 vmd PL011 RX burst mismatch\r\n");
 }

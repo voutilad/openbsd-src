@@ -99,6 +99,23 @@ while [ ${i} -lt 50 ]; do
 	i=$((i + 1))
 	sleep 0.1
 done
+i=0
+while [ ${i} -lt 100 ]; do
+	grep -q "arm64 vmd waiting for PL011 burst" "${console}" && break
+	i=$((i + 1))
+	sleep 0.1
+done
+grep -q "arm64 vmd waiting for PL011 burst" "${console}" ||
+	fail "guest did not become ready for the receive burst"
+printf 'i\rhostname\rpassword\r' >&3
+i=0
+while [ ${i} -lt 300 ]; do
+	grep -q "arm64 vmd PL011 RX burst works" "${console}" && break
+	i=$((i + 1))
+	sleep 0.1
+done
+grep -q "arm64 vmd PL011 RX burst works" "${console}" ||
+	fail "guest lost or reordered a byte in the PL011 receive burst"
 kill "${consolepid}" >/dev/null 2>&1 || true
 wait "${consolepid}" >/dev/null 2>&1 || true
 consolepid=
