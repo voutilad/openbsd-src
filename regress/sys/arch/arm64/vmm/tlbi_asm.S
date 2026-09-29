@@ -22,6 +22,10 @@
 	.global tlbi_boot_start
 	.global tlbi_boot_end
 tlbi_boot_start:
+	/* Optional data access to a physically separate future code page. */
+	cbz	x10, 1f
+	ldr	w11, [x10]
+1:
 	eret
 tlbi_boot_end:
 

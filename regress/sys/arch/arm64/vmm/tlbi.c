@@ -46,6 +46,7 @@
 #define TARGET_VA	0x100000UL
 #define TARGET_L2_VA	0x300000UL
 #define TARGET_L3_PA	0x7000UL
+#define SEPARATE_TARGET_PA	0x10000UL
 
 #define VECTOR_LOWER_SYNC	0x400UL
 #define PTE_VALID		(1ULL << 0)
@@ -106,7 +107,7 @@ run_to_exit(int fd, struct vm_run_params *run)
 }
 
 static int
-run_case(int fd, const struct tlbi_case *tc)
+run_case(int fd, const struct tlbi_case *tc, int prepare)
 {
 	struct vm_create_params create;
 	struct vm_exit vmexit;
@@ -115,16 +116,24 @@ run_case(int fd, const struct tlbi_case *tc)
 	struct vm_sharemem_params share;
 	struct vm_terminate_params term;
 	uint64_t *l1, *l2, *l3;
-	uint64_t target_pte, target_va;
+	uint64_t target_pte, target_va, target_pa;
+	size_t mem_size;
 	char *mem;
 	int created = 0, error, i, ret = 1;
 
 	memset(&create, 0, sizeof(create));
-	snprintf(create.vcp_name, sizeof(create.vcp_name), "tlbi-%s",
-	    tc->tc_name);
+	snprintf(create.vcp_name, sizeof(create.vcp_name), "tlbi-%s-%d",
+	    tc->tc_name, prepare);
+	/*
+	 * The original target shares the bootstrap's 16KB physical region.
+	 * prepare=1 moves it to a separate region; prepare=2 also reads it as
+	 * data before executing it, exercising a shadow-S2 execute upgrade.
+	 */
+	target_pa = prepare ? SEPARATE_TARGET_PA : TARGET_PA;
+	mem_size = prepare ? 20 * PAGE_SIZE : GUEST_MEM_SIZE;
 	create.vcp_ncpus = 1;
 	create.vcp_nmemranges = 1;
-	create.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
+	create.vcp_memranges[0].vmr_size = mem_size;
 	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1) {
 		warn("VMM_IOC_CREATE %s", tc->tc_name);
 		return (1);
@@ -141,14 +150,14 @@ run_case(int fd, const struct tlbi_case *tc)
 		goto out;
 	}
 	mem = (char *)create.vcp_memranges[0].vmr_va;
-	memset(mem, 0, GUEST_MEM_SIZE);
+	memset(mem, 0, mem_size);
 
 	copy_code(mem, BOOT_PA, tlbi_boot_start, tlbi_boot_end);
 	copy_code(mem, VECTOR1_PA + VECTOR_LOWER_SYNC,
 	    tlbi_fault_start, tlbi_fault_end);
 	copy_code(mem, VECTOR2_PA + VECTOR_LOWER_SYNC,
 	    tlbi_success_start, tlbi_success_end);
-	copy_code(mem, TARGET_PA, tlbi_target_start, tlbi_target_end);
+	copy_code(mem, target_pa, tlbi_target_start, tlbi_target_end);
 
 	l1 = (uint64_t *)(mem + L1_PA);
 	l2 = (uint64_t *)(mem + L2_PA);
@@ -158,7 +167,9 @@ run_case(int fd, const struct tlbi_case *tc)
 	/* Identity-map bootstrap, both vector pages, and the page tables. */
 	for (i = 0; i <= 6; i++)
 		l3[i] = (uint64_t)i * PAGE_SIZE | PTE_PAGE_KERNEL;
-	target_pte = TARGET_PA | PTE_PAGE_USER | PTE_NG;
+	if (prepare)
+		l3[target_pa / PAGE_SIZE] = target_pa | PTE_PAGE_KERNEL;
+	target_pte = target_pa | PTE_PAGE_USER | PTE_NG;
 	target_va = tc->tc_l2 ? TARGET_L2_VA : TARGET_VA;
 	if (tc->tc_l2) {
 		uint64_t *target_l3 = (uint64_t *)(mem + TARGET_L3_PA);
@@ -171,7 +182,7 @@ run_case(int fd, const struct tlbi_case *tc)
 	 * Fault repair must invalidate intermediate walk-cache entries as well
 	 * as final translations.  nG makes the target's ASID significant.
 	 */
-	__builtin___clear_cache(mem, mem + GUEST_MEM_SIZE);
+	__builtin___clear_cache(mem, mem + mem_size);
 
 	memset(&reset, 0, sizeof(reset));
 	reset.vrp_vm_id = create.vcp_id;
@@ -206,6 +217,8 @@ run_case(int fd, const struct tlbi_case *tc)
 	/* The handler switches to the even ASID before invalidating the odd one. */
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X8] =
 	    reset.vrp_init_state.vrs_ttbr1_el1 & ~(1ULL << 48);
+	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X10] =
+	    prepare == 2 ? target_pa : 0;
 	if (ioctl(fd, VMM_IOC_RESETCPU, &reset) == -1) {
 		warn("VMM_IOC_RESETCPU");
 		goto out;
@@ -216,6 +229,9 @@ run_case(int fd, const struct tlbi_case *tc)
 	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
 	alarm_fired = 0;
+	printf("case %s prepare=%d target_pa=0x%llx\n", tc->tc_name,
+	    prepare, (unsigned long long)target_pa);
+	fflush(stdout);
 	alarm(10);
 	error = run_to_exit(fd, &run);
 	alarm(0);
@@ -289,11 +305,15 @@ main(void)
 		err(1, "sigaction");
 
 	for (i = 0; i < nitems(cases); i++) {
-		if (run_case(fd, &cases[i]) != 0) {
+		if (run_case(fd, &cases[i], 0) != 0) {
 			ret = 1;
 			break;
 		}
 	}
+	if (ret == 0)
+		ret = run_case(fd, &cases[nitems(cases) - 1], 1);
+	if (ret == 0)
+		ret = run_case(fd, &cases[nitems(cases) - 1], 2);
 	if (ret == 0)
 		printf("guest stage-1 TLBI families exposed newly executable "
 		    "EL0 pages\n");
