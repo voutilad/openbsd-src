@@ -83,7 +83,8 @@ create_memory_map(struct vmd_vm *vm)
 	/*
 	 * vmm(4) requires ascending, non-overlapping guest-physical ranges.
 	 * VM_MEM_MMIO reserves IPA apertures but allocates no backing memory;
-	 * accesses therefore exit to this process for GICv3 or PL011 emulation.
+	 * accesses therefore exit to this process for GICv3, PL011 or PCI emulation.
+	 * PCI windows stay below RAM, so increasing guest RAM cannot cover a BAR.
 	 */
 	vmc->vmc_memranges[0].vmr_gpa = ARM64_GICD_BASE;
 	vmc->vmc_memranges[0].vmr_size = ARM64_GICD_SIZE;
@@ -436,7 +437,7 @@ intr_pending(int vcpu_id)
 void
 intr_toggle_el(struct vmd_vm *vm, int irq, int val)
 {
-	/* There are no emulated interrupt lines to raise or lower yet. */
+	/* No PC ELCR: the FDT describes INTx as level-high to the guest GIC. */
 	(void)vm;
 	(void)irq;
 	(void)val;

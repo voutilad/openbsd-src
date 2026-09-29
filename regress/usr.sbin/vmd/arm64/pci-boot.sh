@@ -9,6 +9,7 @@ console=${out}/console
 vmdpid=
 consolepid=
 created=0
+tap=
 bsd_rd=${BSD_RD:-/bsd.rd}
 
 cleanup()
@@ -25,6 +26,15 @@ cleanup()
 		kill "${vmdpid}" >/dev/null 2>&1
 		wait "${vmdpid}" >/dev/null 2>&1
 	fi
+	# VM teardown is asynchronous.  Reap only the TAP still naming this VM
+	# and wait for it to disappear before another test checks for exclusivity.
+	i=0
+	while [ -n "${tap}" ] && [ "${i}" -lt 100 ] &&
+	    ifconfig "${tap}" 2>/dev/null | grep -Fq -- "-${vmname}"; do
+		ifconfig "${tap}" destroy >/dev/null 2>&1
+		i=$((i + 1))
+		sleep 0.1
+	done
 	chown -R dv "${out}"
 }
 
@@ -129,6 +139,16 @@ send "ifconfig vio0 inet 198.18.0.2/30 up && echo IFCONFIG_''DONE"
 wait_for 'IFCONFIG_DONE'
 send "ping -n -c 5 198.18.0.1 && echo NET_''PASS"
 wait_for 'NET_PASS'
+# Keep block, network, UART and timer sources live together.  Suppress the
+# ping's console output while issuing disk commands to avoid input flooding.
+send "ping -n -c 10 198.18.0.1 >/tmp/pings & echo PING_''STARTED"
+wait_for 'PING_STARTED'
+send "dd if=/dev/rsd0c of=/dev/null bs=512 count=64 && echo BULK_''DONE"
+wait_for 'BULK_DONE'
+send "wait; echo WAIT_''DONE"
+wait_for 'WAIT_DONE'
+send 'cat /tmp/pings'
+wait_for '10 packets transmitted, 10 packets received, 0.0% packet loss'
 send "sleep 1 && echo TIMER_''PASS"
 wait_for 'TIMER_PASS'
 echo BSD_RD_PCI_PASS | tee "${out}/result"
