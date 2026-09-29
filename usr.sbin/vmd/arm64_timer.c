@@ -123,15 +123,23 @@ arm64_timer_schedule_locked(void)
 		return;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	if (timespeccmp(&now, &arm64_timer.td_deadline, >=)) {
-		(void)arm64_timer_refresh_locked();
-		return;
-	}
-	timespecsub(&arm64_timer.td_deadline, &now, &delta);
-	timeout.tv_sec = delta.tv_sec;
-	timeout.tv_usec = (delta.tv_nsec + 999) / 1000;
-	if (timeout.tv_usec >= 1000000) {
-		timeout.tv_sec++;
-		timeout.tv_usec -= 1000000;
+		/*
+		 * WFI publishes the deadline before asking the event thread to
+		 * arm it. If that handoff took too long, dispatch the same timer
+		 * callback immediately instead of using the software-GIC path.
+		 * The hardware timer owns a separate kernel LR: injecting its
+		 * INTID through the device LR as well duplicates the interrupt.
+		 * The callback wakes the vCPU without creating that second line.
+		 */
+		timerclear(&timeout);
+	} else {
+		timespecsub(&arm64_timer.td_deadline, &now, &delta);
+		timeout.tv_sec = delta.tv_sec;
+		timeout.tv_usec = (delta.tv_nsec + 999) / 1000;
+		if (timeout.tv_usec >= 1000000) {
+			timeout.tv_sec++;
+			timeout.tv_usec -= 1000000;
+		}
 	}
 	evtimer_add(&arm64_timer.td_event, &timeout);
 }
