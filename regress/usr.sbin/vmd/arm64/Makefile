@@ -9,10 +9,10 @@ VMD?=		/usr/sbin/vmd
 VMCTL?=		/usr/sbin/vmctl
 
 CLEANFILES+=	guest.o guest_start.o guest.elf console.out vmd.log timer_schedule
-CLEANFILES+=	pci_ecam
+CLEANFILES+=	pci_ecam virtqueue_order
 
 REGRESS_TARGETS=	run-regress-timer-schedule run-regress-fdt-gic-uart
-REGRESS_TARGETS+= run-regress-pci-ecam
+REGRESS_TARGETS+= run-regress-pci-ecam run-regress-virtqueue-order
 REGRESS_ROOT_TARGETS=	run-regress-fdt-gic-uart
 
 VMD_SRC=	${.CURDIR}/../../../../usr.sbin/vmd
@@ -22,6 +22,13 @@ pci_ecam: pci_ecam.c ${VMD_SRC}/pci.c ${VMD_SRC}/pci.h
 
 run-regress-pci-ecam: pci_ecam
 	./pci_ecam
+
+virtqueue_order: virtqueue_order.c ${VMD_SRC}/virtio.h
+	${CC} -O2 -Wall -Wextra -I${VMD_SRC} -o $@ \
+	    ${.CURDIR}/virtqueue_order.c -lpthread
+
+run-regress-virtqueue-order: virtqueue_order
+	./virtqueue_order
 
 timer_schedule: timer_schedule.c ${VMD_SRC}/arm64_timer.c ${VMD_SRC}/log.c
 	${CC} -Wall -Wextra -I${VMD_SRC} -o $@ \

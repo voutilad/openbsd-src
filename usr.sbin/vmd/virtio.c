@@ -367,7 +367,7 @@ viornd_notifyq(struct virtio_dev *dev, uint16_t idx)
 	avail = vq_info->q_avail_hva;
 	used = vq_info->q_used_hva;
 
-	aidx = avail->idx & vq_info->mask;
+	aidx = virtio_avail_idx(avail) & vq_info->mask;
 	uidx = used->idx & vq_info->mask;
 
 	dxx = avail->ring[aidx] & vq_info->mask;
@@ -393,8 +393,7 @@ viornd_notifyq(struct virtio_dev *dev, uint16_t idx)
 		viornd.isr = 1;
 		used->ring[uidx].id = dxx;
 		used->ring[uidx].len = sz;
-		__sync_synchronize();
-		used->idx++;
+		virtio_used_idx(used, used->idx + 1);
 	}
 	free(rnd_data);
 

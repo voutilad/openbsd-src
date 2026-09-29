@@ -380,7 +380,7 @@ vionet_rx(struct virtio_dev *dev, int fd)
 	used = vq_info->q_used_hva;
 	used->flags |= VRING_USED_F_NO_NOTIFY;
 
-	while (idx != avail->idx) {
+	while (idx != virtio_avail_idx(avail)) {
 		hdr_idx = avail->ring[idx & vq_info->mask];
 		desc = &table[hdr_idx & vq_info->mask];
 		if (!DESC_WRITABLE(desc)) {
@@ -482,11 +482,12 @@ vionet_rx(struct virtio_dev *dev, int fd)
 		/* Mark our buffers as used. */
 		used->ring[used->idx & vq_info->mask].id = hdr_idx;
 		used->ring[used->idx & vq_info->mask].len = sz;
-		__sync_synchronize();
-		used->idx++;
+		virtio_used_idx(used, used->idx + 1);
 		idx++;
 	}
 
+	/* Publish completions before testing the guest's interrupt suppression. */
+	__sync_synchronize();
 	if (idx != vq_info->last_avail &&
 	    !(avail->flags & VRING_AVAIL_F_NO_INTERRUPT)) {
 		notify = 1;
@@ -752,7 +753,7 @@ vionet_tx(struct virtio_dev *dev)
 	avail = vq_info->q_avail_hva;
 	used = vq_info->q_used_hva;
 
-	while (idx != avail->idx) {
+	while (idx != virtio_avail_idx(avail)) {
 		hdr_idx = avail->ring[idx & vq_info->mask];
 		desc = &table[hdr_idx & vq_info->mask];
 		if (DESC_WRITABLE(desc)) {
@@ -886,8 +887,7 @@ vionet_tx(struct virtio_dev *dev)
 drop:
 		used->ring[used->idx & vq_info->mask].id = hdr_idx;
 		used->ring[used->idx & vq_info->mask].len = chain_len;
-		__sync_synchronize();
-		used->idx++;
+		virtio_used_idx(used, used->idx + 1);
 		idx++;
 
 		/* Facilitate DHCP reply injection, if needed. */
@@ -909,6 +909,8 @@ drop:
 		}
 	}
 
+	/* A store/load barrier also closes the notification-suppression race. */
+	__sync_synchronize();
 	if (idx != vq_info->last_avail &&
 	    !(avail->flags & VRING_AVAIL_F_NO_INTERRUPT))
 		notify = 1;

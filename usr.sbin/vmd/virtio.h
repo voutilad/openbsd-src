@@ -112,6 +112,31 @@
 #define DESC_WRITABLE(/* struct vring_desc */ x)	\
 	(((x)->flags & VRING_DESC_F_WRITE) ? 1 : 0)
 
+/*
+ * Split-ring indices publish ownership of descriptors and buffers across
+ * CPUs/processes.  x86's load ordering is not an arm64 guarantee: observing
+ * avail.idx must acquire the preceding guest writes before we read a chain.
+ * Queue setup validates two-byte alignment.  Address via the byte offset
+ * because the wire-format structures are packed, not because an unaligned
+ * atomic access is supported.
+ */
+static inline uint16_t
+virtio_avail_idx(struct vring_avail *avail)
+{
+	uint16_t *idx = (uint16_t *)((char *)avail + sizeof(uint16_t));
+
+	return (__atomic_load_n(idx, __ATOMIC_ACQUIRE));
+}
+
+static inline void
+virtio_used_idx(struct vring_used *used, uint16_t value)
+{
+	uint16_t *idx = (uint16_t *)((char *)used + sizeof(uint16_t));
+
+	/* Publish buffer data, request status and used-ring entries together. */
+	__atomic_store_n(idx, value, __ATOMIC_RELEASE);
+}
+
 struct virtio_pci_common_cap {
 	union {
 		struct pci_cap pci;

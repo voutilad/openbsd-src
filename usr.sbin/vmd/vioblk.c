@@ -282,7 +282,7 @@ vioblk_notifyq(struct virtio_dev *dev, uint16_t vq_idx)
 	avail = vq_info->q_avail_hva;
 	used = vq_info->q_used_hva;
 
-	while (idx != avail->idx) {
+	while (idx != virtio_avail_idx(avail)) {
 		/* Retrieve Command descriptor. */
 		cmd_desc_idx = avail->ring[idx & vq_info->mask];
 		if (cmd_desc_idx >= vq_info->qs) {
@@ -375,8 +375,7 @@ vioblk_notifyq(struct virtio_dev *dev, uint16_t vq_idx)
 		used->ring[used->idx & vq_info->mask].id = cmd_desc_idx;
 		used->ring[used->idx & vq_info->mask].len = cmd_len;
 
-		__sync_synchronize();
-		used->idx++;
+		virtio_used_idx(used, used->idx + 1);
 		idx++;
 	}
 
