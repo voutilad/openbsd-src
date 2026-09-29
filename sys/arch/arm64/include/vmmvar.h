@@ -145,10 +145,10 @@ struct vm_intr_params {
 #define VMM_INTR_MAX		1019
 #define VMM_INTR_LEVEL_LOW	0
 #define VMM_INTR_LEVEL_HIGH	1
+#define VMM_INTR_LEVEL_KICK	2	/* Exit only; leave the IRQ unchanged. */
 
 struct vm_irqcfg_params {
 	/* Input parameters to VMM_IOC_IRQCFG. */
-	uint32_t		viq_vm_id;
 	uint32_t		viq_vcpu_id;
 	uint16_t		viq_intr;
 	uint8_t			viq_priority;
@@ -365,13 +365,15 @@ void	vmm_attach_machdep(struct device *, struct device *, void *);
 void	vmm_activate_machdep(struct device *, int);
 int	vmm_start(void);
 int	vmm_stop(void);
-int	pledge_ioctl_vmm_machdep(struct proc *, long);
 int	vm_impl_init(struct vm *, struct proc *);
 void	vm_impl_deinit(struct vm *);
 int	vcpu_init(struct vcpu *, struct vm_create_params *);
 void	vcpu_deinit(struct vcpu *);
 int	vcpu_reset_regs(struct vcpu *, struct vcpu_reg_state *);
-int	vm_rwregs(struct vm_rwregs_params *, int);
+/* The common per-VM file ioctl dispatcher owns the VM reference. */
+int	vm_intr_pending(struct vm *, struct vm_intr_params *);
+int	vm_irqcfg(struct vm *, struct vm_irqcfg_params *);
+int	vm_rwregs(struct vm *, struct vm_rwregs_params *, int);
 
 #endif /* _KERNEL */
 

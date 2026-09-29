@@ -1374,6 +1374,9 @@ pledge_ioctl(struct proc *p, long com, struct file *fp)
 			case VMM_IOC_WRITEVMPARAMS:
 			case VMM_IOC_SHAREMEM:
 			case VMM_IOC_INTR:
+#ifdef __aarch64__
+			case VMM_IOC_IRQCFG:
+#endif
 				return (0);
 			default:
 				break;

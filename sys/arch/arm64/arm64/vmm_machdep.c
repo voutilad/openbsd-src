@@ -111,8 +111,6 @@ static int	arm64_vmm_alloc_memory(struct vm *);
 static struct arm64_vmm_s2_table *arm64_vmm_s2_alloc(struct vcpu *);
 static uint64_t *arm64_vmm_s2_lookup(struct vcpu *, paddr_t, int);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
-static int	arm64_vmm_intr_pending(struct vm_intr_params *);
-static int	arm64_vmm_irqcfg(struct vm_irqcfg_params *);
 static int	arm64_vmm_defer_host_timer(struct arm64_vmm_run *);
 static void	arm64_vmm_load_lr(uint64_t *, uint64_t);
 static void	arm64_vmm_load_intr(struct vcpu *);
@@ -213,21 +211,6 @@ vmm_stop(void)
 	return (0);
 }
 
-int
-vmmioctl_machdep(dev_t dev, u_long cmd, caddr_t data, int flag,
-    struct proc *p)
-{
-	switch (cmd) {
-	case VMM_IOC_INTR:
-		return (arm64_vmm_intr_pending(
-		    (struct vm_intr_params *)data));
-	case VMM_IOC_IRQCFG:
-		return (arm64_vmm_irqcfg((struct vm_irqcfg_params *)data));
-	default:
-		return (ENOTTY);
-	}
-}
-
 /*
  * Configure the GIC properties of an interrupt whose signal originates in
  * vmm(4), rather than in a userland device model.  The architectural virtual
@@ -235,16 +218,12 @@ vmmioctl_machdep(dev_t dev, u_long cmd, caddr_t data, int flag,
  * this ioctl supplies only the Distributor/Redistributor policy which vmd
  * learned from guest MMIO.
  */
-static int
-arm64_vmm_irqcfg(struct vm_irqcfg_params *viq)
+int
+vm_irqcfg(struct vm *vm, struct vm_irqcfg_params *viq)
 {
-	struct vm *vm;
 	struct vcpu *vcpu;
-	int error, ret = 0;
+	int ret = 0;
 
-	error = vm_find(viq->viq_vm_id, &vm);
-	if (error != 0)
-		return (error);
 	vcpu = vm_find_vcpu(vm, viq->viq_vcpu_id);
 	if (vcpu == NULL) {
 		ret = ENOENT;
@@ -263,30 +242,25 @@ arm64_vmm_irqcfg(struct vm_irqcfg_params *viq)
 	else
 		WRITE_ONCE(vcpu->vc_timer_intr, 0);
 out:
-	refcnt_rele_wake(&vm->vm_refcnt);
 	return (ret);
 }
 
-static int
-arm64_vmm_intr_pending(struct vm_intr_params *vip)
+int
+vm_intr_pending(struct vm *vm, struct vm_intr_params *vip)
 {
-	struct vm *vm;
 	struct vcpu *vcpu;
 #ifdef MULTIPROCESSOR
 	struct cpu_info *ci;
 #endif
-	int error, ret = 0;
+	int ret = 0;
 
-	error = vm_find(vip->vip_vm_id, &vm);
-	if (error != 0)
-		return (error);
 	vcpu = vm_find_vcpu(vm, vip->vip_vcpu_id);
 	if (vcpu == NULL) {
 		ret = ENOENT;
 		goto out;
 	}
 	if (vip->vip_intr > VMM_INTR_MAX ||
-	    vip->vip_level > VMM_INTR_LEVEL_HIGH) {
+	    vip->vip_level > VMM_INTR_LEVEL_KICK) {
 		ret = EINVAL;
 		goto out;
 	}
@@ -306,8 +280,9 @@ arm64_vmm_intr_pending(struct vm_intr_params *vip)
 		WRITE_ONCE(vcpu->vc_intr, VMM_INTR_VALID |
 		    ((uint64_t)vip->vip_priority << VMM_INTR_PRIORITY_SHIFT) |
 		    vip->vip_intr);
-	else
+	else if (vip->vip_level == VMM_INTR_LEVEL_LOW)
 		WRITE_ONCE(vcpu->vc_intr, 0);
+	/* KICK is a scheduling notification, not a device line transition. */
 #ifdef MULTIPROCESSOR
 	/*
 	 * A vCPU executing on another CPU will not rebuild HCR_EL2 until it
@@ -321,16 +296,7 @@ arm64_vmm_intr_pending(struct vm_intr_params *vip)
 		arm_send_ipi(ci, ARM_IPI_NOP);
 #endif
 out:
-	refcnt_rele_wake(&vm->vm_refcnt);
 	return (ret);
-}
-
-int
-pledge_ioctl_vmm_machdep(struct proc *p, long com)
-{
-	if (com == VMM_IOC_INTR || com == VMM_IOC_IRQCFG)
-		return (0);
-	return (EPERM);
 }
 
 int
@@ -574,15 +540,11 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 }
 
 int
-vm_rwregs(struct vm_rwregs_params *vrwp, int dir)
+vm_rwregs(struct vm *vm, struct vm_rwregs_params *vrwp, int dir)
 {
-	struct vm *vm;
 	struct vcpu *vcpu;
-	int error, ret = 0;
+	int ret = 0;
 
-	error = vm_find(vrwp->vrwp_vm_id, &vm);
-	if (error)
-		return (error);
 	vcpu = vm_find_vcpu(vm, vrwp->vrwp_vcpu_id);
 	if (vcpu == NULL) {
 		ret = ENOENT;
@@ -610,12 +572,11 @@ vm_rwregs(struct vm_rwregs_params *vrwp, int dir)
 	}
 	rw_exit_write(&vcpu->vc_lock);
 out:
-	refcnt_rele_wake(&vm->vm_refcnt);
 	return (ret);
 }
 
 int
-vm_rwvmparams(struct vm_rwvmparams_params *vpp, int dir)
+vm_rwvmparams(struct vm *vm, struct vm_rwvmparams_params *vpp, int dir)
 {
 	return (EOPNOTSUPP);
 }
@@ -937,10 +898,9 @@ arm64_vmm_save_run(struct vcpu *vcpu)
 }
 
 int
-vm_run(struct vm_run_params *vrp)
+vm_run(struct vm *vm, struct vm_run_params *vrp)
 {
 	struct arm64_vmm_run *run;
-	struct vm *vm;
 	struct vcpu *vcpu;
 	struct cpu_info *entry_ci;
 	paddr_t ipa, last_ipa = (paddr_t)-1;
@@ -951,9 +911,7 @@ vm_run(struct vm_run_params *vrp)
 	int recovery_s;
 	int save_async;
 
-	error = vm_find(vrp->vrp_vm_id, &vm);
-	if (error)
-		return (error);
+	/* vm_ioctl holds the VM reference for the entire run, including sleeps. */
 	vcpu = vm_find_vcpu(vm, vrp->vrp_vcpu_id);
 	if (vcpu == NULL) {
 		error = ENOENT;
@@ -964,7 +922,10 @@ vm_run(struct vm_run_params *vrp)
 	old = atomic_cas_uint(&vcpu->vc_state, VCPU_STATE_STOPPED,
 	    VCPU_STATE_RUNNING);
 	if (old != VCPU_STATE_STOPPED) {
-		error = EBUSY;
+		if (old == VCPU_STATE_REQTERM || old == VCPU_STATE_TERMINATED)
+			vrp->vrp_exit_reason = VM_EXIT_TERMINATED;
+		else
+			error = EBUSY;
 		goto out_unlock;
 	}
 
@@ -1020,6 +981,13 @@ vm_run(struct vm_run_params *vrp)
 	}
 	vrp->vrp_exit_reason = VM_EXIT_NONE;
 	for (;;) {
+		/*
+		 * Yield only with a full saved context. Asynchronous retries may
+		 * still have resident EL12 state; their existing retry bound forces
+		 * a full save before returning to the host scheduler.
+		 */
+		if (irq_retries == 0 && vcpu_must_yield(vcpu))
+			break;
 		/*
 		 * Protect all of a recovery retry, not only the final assembly
 		 * transition.  Under nesting, the C-side state preparation also traps
@@ -1182,10 +1150,15 @@ vm_run(struct vm_run_params *vrp)
 		vcpu->vc_exit_pending =
 		    vrp->vrp_exit_reason != VM_EXIT_NONE;
 out_stopped:
-	vcpu->vc_state = VCPU_STATE_STOPPED;
+	/* Do not overwrite a concurrent close's termination request. */
+	old = atomic_cas_uint(&vcpu->vc_state, VCPU_STATE_RUNNING,
+	    VCPU_STATE_STOPPED);
+	if (old == VCPU_STATE_REQTERM) {
+		atomic_swap_uint(&vcpu->vc_state, VCPU_STATE_TERMINATED);
+		vrp->vrp_exit_reason = VM_EXIT_TERMINATED;
+	}
 out_unlock:
 	rw_exit_write(&vcpu->vc_lock);
 out:
-	refcnt_rele_wake(&vm->vm_refcnt);
 	return (error);
 }

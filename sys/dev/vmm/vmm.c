@@ -649,8 +649,13 @@ vm_request_stop(struct vm *vm)
 		 */
 		if (old != VCPU_STATE_TERMINATED) {
 			ci = READ_ONCE(vcpu->vc_curcpu);
-			if (ci != NULL)
+			if (ci != NULL) {
+#if defined(__amd64__)
 				x86_send_ipi(ci, X86_IPI_NOP);
+#elif defined(__aarch64__)
+				arm_send_ipi(ci, ARM_IPI_NOP);
+#endif
+			}
 		}
 #endif
 	}
@@ -872,6 +877,11 @@ vm_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 	case VMM_IOC_INTR:
 		ret = vm_intr_pending(vm, (struct vm_intr_params *)data);
 		break;
+#ifdef __aarch64__
+	case VMM_IOC_IRQCFG:
+		ret = vm_irqcfg(vm, (struct vm_irqcfg_params *)data);
+		break;
+#endif
 	default:
 		ret = ENOTTY;
 		break;
