@@ -33,6 +33,9 @@
 #include "atomicio.h"
 #include "lapic.h"
 #include "mmio.h"
+#ifdef __aarch64__
+#include "arm64_vm.h"
+#endif
 
 struct pci pci;
 #ifdef __amd64__
@@ -76,10 +79,8 @@ static int pci_msix_mmio(uint32_t, int, uint32_t, uint8_t, uint64_t *,
 static void pci_msi_deliver(uint64_t, uint32_t);
 static int pci_msi_enabled(struct pci_dev *);
 static int pci_msix_enabled(struct pci_dev *);
-#ifdef __amd64__
 static void pci_config_write(struct pci_dev *, uint8_t, uint8_t, uint8_t,
     uint32_t);
-#endif /* __amd64__ */
 static void pci_msix_drain(struct pci_dev *);
 
 /* PIC IRQs, assigned to devices in order */
@@ -622,7 +623,11 @@ pci_init(void)
 	/* Check if changes to struct pci_dev create an invalid config space. */
 	CTASSERT(sizeof(pci.pci_devices[0].pd_cfg_space) <= 256);
 
+#ifdef __aarch64__
+	pci.pci_next_mmio_bar = ARM64_PCI_MEM_BASE;
+#else
 	pci.pci_next_mmio_bar = PCI_MMIO_BAR_BASE;
+#endif
 #ifdef __amd64__
 	pci.pci_next_io_bar = VM_PCI_IO_BAR_BASE;
 #endif /* __amd64__ */
@@ -635,7 +640,6 @@ pci_init(void)
 	}
 }
 
-#ifdef __amd64__
 int
 pci_handle_mmio(uint32_t vcpu_id, int dir, paddr_t addr, uint8_t size,
     uint64_t *data)
@@ -651,7 +655,8 @@ pci_handle_mmio(uint32_t vcpu_id, int dir, paddr_t addr, uint8_t size,
 			if (dev->pd_bartype[j] != PCI_BAR_TYPE_MMIO)
 				continue;
 			base = PCI_MAPREG_MEM_ADDR(dev->pd_bar[j]);
-			if (addr < base || addr >= base + dev->pd_barsize[j])
+			if (addr < base || addr - base >= dev->pd_barsize[j] ||
+			    size > dev->pd_barsize[j] - (addr - base))
 				continue;
 			fn = (pci_mmiobar_fn_t)dev->pd_barfunc[j];
 			if (fn == NULL)
@@ -741,6 +746,53 @@ pci_config_write(struct pci_dev *dev, uint8_t reg, uint8_t ofs, uint8_t sz,
 		pci_msix_drain(dev);
 }
 
+#ifdef __aarch64__
+/*
+ * ECAM selects a function with address bits rather than x86 I/O ports.
+ * One bus occupies 1MB; each function owns 4KB even though our endpoints
+ * currently implement only the conventional 256-byte configuration header.
+ * In particular, extended offsets must not alias the vendor ID or BARs.
+ */
+int
+pci_handle_ecam(int dir, paddr_t addr, uint8_t size, uint64_t *data)
+{
+	struct pci_dev *dev;
+	uint32_t off, slot, fn, reg, value;
+
+	if (addr < ARM64_PCI_ECAM_BASE ||
+	    addr - ARM64_PCI_ECAM_BASE >= ARM64_PCI_ECAM_SIZE ||
+	    (size != 1 && size != 2 && size != 4) ||
+	    (addr & (size - 1)) != 0)
+		return (EINVAL);
+	off = addr - ARM64_PCI_ECAM_BASE;
+	slot = (off >> 15) & 31;
+	fn = (off >> 12) & 7;
+	reg = off & 0xfff;
+	if (fn != 0 || slot >= pci.pci_dev_ct) {
+		if (dir == MMIO_DIR_READ)
+			*data = UINT32_MAX;
+		return (0);
+	}
+	dev = &pci.pci_devices[slot];
+	if (reg >= sizeof(dev->pd_cfg_space)) {
+		if (dir == MMIO_DIR_READ)
+			*data = 0; /* No extended capabilities. */
+		return (0);
+	}
+	if (dir == MMIO_DIR_WRITE) {
+		if ((reg & ~3U) != PCI_EXROMADDR_0)
+			pci_config_write(dev, reg / 4, reg & 3, size, *data);
+	} else {
+		pthread_mutex_lock(&dev->pd_mtx);
+		value = dev->pd_cfg_space[reg / 4];
+		pthread_mutex_unlock(&dev->pd_mtx);
+		*data = value >> ((reg & 3) * 8);
+	}
+	return (0);
+}
+#endif
+
+#ifdef __amd64__
 void
 pci_handle_address_reg(struct vm_run_params *vrp)
 {

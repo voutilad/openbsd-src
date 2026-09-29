@@ -31,6 +31,8 @@
 #include "vmd.h"
 #include "vmm.h"
 #include "arm64_vm.h"
+#include "pci.h"
+#include "mmio.h"
 #include "arm64_timer.h"
 #include "gicv3.h"
 #include "pl011.h"
@@ -91,10 +93,16 @@ create_memory_map(struct vmd_vm *vm)
 	vmc->vmc_memranges[2].vmr_gpa = ARM64_UART_BASE;
 	vmc->vmc_memranges[2].vmr_size = ARM64_UART_SIZE;
 	vmc->vmc_memranges[2].vmr_type = VM_MEM_MMIO;
-	vmc->vmc_memranges[3].vmr_gpa = ARM64_RAM_BASE;
-	vmc->vmc_memranges[3].vmr_size = memsize;
-	vmc->vmc_memranges[3].vmr_type = VM_MEM_RAM;
-	vmc->vmc_nmemranges = 4;
+	vmc->vmc_memranges[3].vmr_gpa = ARM64_PCI_ECAM_BASE;
+	vmc->vmc_memranges[3].vmr_size = ARM64_PCI_ECAM_SIZE;
+	vmc->vmc_memranges[3].vmr_type = VM_MEM_MMIO;
+	vmc->vmc_memranges[4].vmr_gpa = ARM64_PCI_MEM_BASE;
+	vmc->vmc_memranges[4].vmr_size = ARM64_PCI_MEM_SIZE;
+	vmc->vmc_memranges[4].vmr_type = VM_MEM_MMIO;
+	vmc->vmc_memranges[5].vmr_gpa = ARM64_RAM_BASE;
+	vmc->vmc_memranges[5].vmr_size = memsize;
+	vmc->vmc_memranges[5].vmr_type = VM_MEM_RAM;
+	vmc->vmc_nmemranges = 6;
 }
 
 int
@@ -297,6 +305,7 @@ init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
 	gicv3_init(vm->vm_fd);
 	arm64_timer_init(vm->vm_fd);
 	pl011_init(con_fd, vm->vm_fd);
+	pci_init();
 	return (0);
 }
 
@@ -517,6 +526,16 @@ arm64_mmio_access(paddr_t gpa, size_t len, int write, uint64_t *data)
 {
 	uint32_t uart_data;
 	int error;
+
+	/* PCI configuration and device BARs use the same syndrome-only exits. */
+	if (gpa >= ARM64_PCI_ECAM_BASE &&
+	    gpa - ARM64_PCI_ECAM_BASE < ARM64_PCI_ECAM_SIZE)
+		return (pci_handle_ecam(write ? MMIO_DIR_WRITE : MMIO_DIR_READ,
+		    gpa, len, data));
+	if (gpa >= ARM64_PCI_MEM_BASE &&
+	    gpa - ARM64_PCI_MEM_BASE < ARM64_PCI_MEM_SIZE)
+		return (pci_handle_mmio(0, write ? MMIO_DIR_WRITE : MMIO_DIR_READ,
+		    gpa, len, data));
 
 	if ((gpa >= ARM64_GICD_BASE &&
 	    gpa - ARM64_GICD_BASE < ARM64_GICD_SIZE) ||

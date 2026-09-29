@@ -62,6 +62,11 @@ struct arm64_fdt_strings {
 	char	stdout_path[sizeof("stdout-path")];
 	char	status[sizeof("status")];
 	char	clock_frequency[sizeof("clock-frequency")];
+	char	bus_range[sizeof("bus-range")];
+	char	ranges[sizeof("ranges")];
+	char	dma_coherent[sizeof("dma-coherent")];
+	char	interrupt_map[sizeof("interrupt-map")];
+	char	interrupt_map_mask[sizeof("interrupt-map-mask")];
 };
 
 static const struct arm64_fdt_strings arm64_fdt_strings = {
@@ -79,7 +84,12 @@ static const struct arm64_fdt_strings arm64_fdt_strings = {
 	.phandle = "phandle",
 	.stdout_path = "stdout-path",
 	.status = "status",
-	.clock_frequency = "clock-frequency"
+	.clock_frequency = "clock-frequency",
+	.bus_range = "bus-range",
+	.ranges = "ranges",
+	.dma_coherent = "dma-coherent",
+	.interrupt_map = "interrupt-map",
+	.interrupt_map_mask = "interrupt-map-mask"
 };
 
 #define FDT_NAMEOFF(_member) \
@@ -90,6 +100,7 @@ static int	fdt_end_node(struct fdt_writer *);
 static int	fdt_prop(struct fdt_writer *, uint32_t, const void *,
 		    size_t);
 static int	fdt_prop_gic_reg(struct fdt_writer *);
+static int	fdt_pci(struct fdt_writer *);
 static int	fdt_prop_reg(struct fdt_writer *, uint64_t, uint64_t);
 static int	fdt_prop_string(struct fdt_writer *, uint32_t,
 		    const char *);
@@ -209,11 +220,56 @@ fdt_prop_string(struct fdt_writer *w, uint32_t nameoff, const char *value)
 }
 
 /*
- * Build the deliberately small platform description used by the first arm64
- * vmd backend.  There is one CPU, one contiguous RAM range, a GICv3 with one
- * Redistributor, a generic timer using the architectural virtual PPI, and one
- * polling PL011.  The UART has no interrupts property, so the table does not
- * claim interrupt-driven serial I/O before it exists.
+ * The host bridge is the only PCI node in the FDT: endpoints are discovered
+ * through ECAM.  PCI and CPU memory addresses are identical, and the device
+ * processes share coherent guest RAM.  There is no I/O-port window or MSI
+ * controller.  Four level-high SPIs carry the conventional swizzled INTx
+ * pins; masking the slot to its low two bits covers all 32 possible slots.
+ */
+static int
+fdt_pci(struct fdt_writer *w)
+{
+	uint32_t ranges[7] = { htobe32(0x02000000), 0,
+	    htobe32(ARM64_PCI_MEM_BASE), 0, htobe32(ARM64_PCI_MEM_BASE),
+	    0, htobe32(ARM64_PCI_MEM_SIZE) };
+	uint32_t buses[2] = { 0, 0 };
+	uint32_t mask[4] = { htobe32(0x1800), 0, 0, htobe32(7) };
+	uint32_t map[4 * 4 * 8];
+	unsigned int slot, pin, n = 0;
+
+	for (slot = 0; slot < 4; slot++) {
+		for (pin = 1; pin <= 4; pin++) {
+			map[n++] = htobe32(slot << 11);
+			map[n++] = 0;
+			map[n++] = 0;
+			map[n++] = htobe32(pin);
+			map[n++] = htobe32(1); /* GIC phandle. */
+			map[n++] = 0; /* SPI, not PPI. */
+			map[n++] = htobe32(ARM64_PCI_INTID_BASE - 32 +
+			    ((slot + pin - 1) % ARM64_PCI_NINTX));
+			map[n++] = htobe32(4); /* Level high. */
+		}
+	}
+	if (fdt_begin_node(w, "pcie@10000000") == -1 ||
+	    fdt_prop_string(w, FDT_NAMEOFF(compatible),
+	    "pci-host-ecam-generic") == -1 ||
+	    fdt_prop_string(w, FDT_NAMEOFF(device_type), "pci") == -1 ||
+	    fdt_prop_u32(w, FDT_NAMEOFF(address_cells), 3) == -1 ||
+	    fdt_prop_u32(w, FDT_NAMEOFF(size_cells), 2) == -1 ||
+	    fdt_prop_u32(w, FDT_NAMEOFF(interrupt_cells), 1) == -1 ||
+	    fdt_prop_reg(w, ARM64_PCI_ECAM_BASE, ARM64_PCI_ECAM_SIZE) == -1 ||
+	    fdt_prop(w, FDT_NAMEOFF(bus_range), buses, sizeof(buses)) == -1 ||
+	    fdt_prop(w, FDT_NAMEOFF(ranges), ranges, sizeof(ranges)) == -1 ||
+	    fdt_prop(w, FDT_NAMEOFF(dma_coherent), NULL, 0) == -1 ||
+	    fdt_prop(w, FDT_NAMEOFF(interrupt_map_mask), mask, sizeof(mask)) == -1 ||
+	    fdt_prop(w, FDT_NAMEOFF(interrupt_map), map, sizeof(map)) == -1 ||
+	    fdt_end_node(w) == -1)
+		return (-1);
+	return (0);
+}
+
+/*
+ * Describe the UP platform: RAM, GICv3, virtual timer, PL011 and PCI ECAM.
  *
  * The last 16KB stage-2 page is firmware-owned.  It contains this DTB and is
  * omitted from /memory so a future guest allocator cannot recycle the blob.
@@ -288,6 +344,7 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	/* Phandle 1 is also the root's default interrupt-parent above. */
 	if (fdt_begin_node(&w, "intc@8000000") == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(compatible), "arm,gic-v3") == -1 ||
+	    fdt_prop_u32(&w, FDT_NAMEOFF(address_cells), 0) == -1 ||
 	    fdt_prop_u32(&w, FDT_NAMEOFF(interrupt_cells), 3) == -1 ||
 	    fdt_prop(&w, FDT_NAMEOFF(interrupt_controller), NULL, 0) == -1 ||
 	    fdt_prop_gic_reg(&w) == -1 ||
@@ -322,7 +379,8 @@ arm64_fdt_build(void *buf, size_t buflen, size_t ram_size, size_t *sizep)
 	    fdt_prop(&w, FDT_NAMEOFF(interrupts), uart_interrupt,
 	    sizeof(uart_interrupt)) == -1 ||
 	    fdt_prop_string(&w, FDT_NAMEOFF(status), "okay") == -1 ||
-	    fdt_end_node(&w) == -1 || fdt_end_node(&w) == -1 ||
+	    fdt_end_node(&w) == -1 || fdt_pci(&w) == -1 ||
+	    fdt_end_node(&w) == -1 ||
 	    fdt_put_u32(&w, FDT_END) == -1)
 		goto nospc;
 	struct_size = w.off - struct_off;
