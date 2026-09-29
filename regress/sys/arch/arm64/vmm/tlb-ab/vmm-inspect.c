@@ -1,4 +1,10 @@
-/* Temporary diagnostic utility, not installed or part of the vmm ABI. */
+/*
+ * Temporary diagnostic utility, not installed or part of the vmm ABI.
+ * The launcher must pass an inherited VM fd; opening /dev/vmm no longer
+ * grants access to another process's VM by its former numeric ID.
+ * Memory inspection still assumes the original 512MB diagnostic layout
+ * and, for counters, the exact historic bsd.rd payload's symbol offsets.
+ */
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <machine/vmmvar.h>
@@ -6,13 +12,14 @@
 #include <uvm/uvmexp.h>
 #include <err.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 static void
-walk(int fd, unsigned int id, const struct vcpu_reg_state *r)
+walk(int fd, const struct vcpu_reg_state *r)
 {
 	struct vm_sharemem_params s;
 	uint64_t table, pte, pa;
@@ -21,20 +28,6 @@ walk(int fd, unsigned int id, const struct vcpu_reg_state *r)
 	char *ram;
 
 	memset(&s, 0, sizeof(s));
-	s.vsp_vm_id = id;
-	s.vsp_nmemranges = 4;
-	s.vsp_memranges[0].vmr_gpa = 0x08000000;
-	s.vsp_memranges[0].vmr_size = 0x10000;
-	s.vsp_memranges[0].vmr_type = VM_MEM_MMIO;
-	s.vsp_memranges[1].vmr_gpa = 0x080a0000;
-	s.vsp_memranges[1].vmr_size = 0x20000;
-	s.vsp_memranges[1].vmr_type = VM_MEM_MMIO;
-	s.vsp_memranges[2].vmr_gpa = 0x09000000;
-	s.vsp_memranges[2].vmr_size = 0x4000;
-	s.vsp_memranges[2].vmr_type = VM_MEM_MMIO;
-	s.vsp_memranges[3].vmr_gpa = 0x40000000;
-	s.vsp_memranges[3].vmr_size = 512UL * 1024 * 1024;
-	s.vsp_memranges[3].vmr_type = VM_MEM_RAM;
 	if (ioctl(fd, VMM_IOC_SHAREMEM, &s) == -1)
 		err(1, "SHAREMEM (requires the 512MB vmd diagnostic layout)");
 	ram = (char *)s.vsp_va[3];
@@ -82,24 +75,23 @@ main(int argc, char **argv)
 	struct vm_irqcfg_params q;
 	struct vcpu_reg_state *r = &p.vrwp_regs;
 	const char *error;
-	unsigned int id, i;
+	unsigned int i;
 	int fd;
 
 	if (argc < 2 || argc > 3)
-		errx(1, "usage: vmm-inspect id [walk|counters|timer-off|timer-on]");
-	id = strtonum(argv[1], 1, 65535, &error);
+		errx(1, "usage: vmm-inspect inherited-fd "
+		    "[walk|counters|timer-off|timer-on]");
+	fd = strtonum(argv[1], 0, INT_MAX, &error);
 	if (error)
-		errx(1, "id: %s", error);
-	fd = open("/dev/vmm", O_RDWR);
-	if (fd == -1)
-		err(1, "open");
+		errx(1, "fd: %s", error);
+	if (fcntl(fd, F_GETFD) == -1)
+		err(1, "inherited VM descriptor");
 	if (argc == 3 && strcmp(argv[2], "counters") == 0) {
-		walk(fd, id, NULL);
+		walk(fd, NULL);
 		return (0);
 	}
 	if (argc == 3 && strcmp(argv[2], "walk") != 0) {
 		memset(&q, 0, sizeof(q));
-		q.viq_vm_id = id;
 		q.viq_intr = VMM_ARM64_TIMER_INTID;
 		q.viq_priority = 0x50;
 		if (strcmp(argv[2], "timer-on") == 0)
@@ -111,7 +103,6 @@ main(int argc, char **argv)
 		return (0);
 	}
 	memset(&p, 0, sizeof(p));
-	p.vrwp_vm_id = id;
 	p.vrwp_mask = VM_RWREGS_ALL;
 	if (ioctl(fd, VMM_IOC_READREGS, &p) == -1)
 		err(1, "READREGS");
@@ -124,6 +115,6 @@ main(int argc, char **argv)
 		    i % 3 == 2 ? '\n' : ' ');
 	putchar('\n');
 	if (argc == 3)
-		walk(fd, id, r);
+		walk(fd, r);
 	return (0);
 }

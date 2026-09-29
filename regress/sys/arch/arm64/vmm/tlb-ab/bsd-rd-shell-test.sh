@@ -1,5 +1,5 @@
 #!/bin/sh
-# Temporary non-destructive check of the installer's S option.
+# Non-destructive check of the installer's S option.
 set -eu
 
 out=$(mktemp -d /home/dv/bsd-rd-shell.XXXXXXXX)
@@ -8,6 +8,7 @@ console=${out}/console
 vmdpid=
 consolepid=
 created=0
+bsd_rd=${BSD_RD:-/home/dv/bsd.rd.vmm}
 
 cleanup()
 {
@@ -55,6 +56,7 @@ send()
 trap cleanup EXIT HUP INT TERM
 echo "RESULT_DIRECTORY=${out}"
 uname -a >"${out}/kernel"
+sha256 "${bsd_rd}" >"${out}/payload"
 date -u >"${out}/started"
 if vmctl status 2>/dev/null | grep -q 'STATE NAME'; then
 	fail 'another vmd instance is running'
@@ -70,7 +72,7 @@ while [ "${i}" -lt 100 ]; do
 	sleep 0.1
 done
 vmctl status 2>/dev/null | grep -q 'STATE NAME' || fail 'vmd not ready'
-startout=$(vmctl start -m 512M -b /home/dv/bsd.rd.vmm "${vmname}" 2>&1) ||
+startout=$(vmctl start -m 512M -b "${bsd_rd}" "${vmname}" 2>&1) ||
 	fail 'vmctl start failed'
 created=1
 tty=$(printf '%s\n' "${startout}" | sed -n 's/^.*tty //p')
