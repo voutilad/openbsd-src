@@ -33,6 +33,7 @@
 #include "arm64_vm.h"
 #include "pci.h"
 #include "mmio.h"
+#include "virtio.h"
 #include "arm64_timer.h"
 #include "gicv3.h"
 #include "pl011.h"
@@ -291,22 +292,16 @@ int
 init_emulated_hw(struct vmd_vm *vm, int child_cdrom,
     int child_disks[][VM_MAX_BASE_PER_DISK], int *child_taps)
 {
-	(void)child_cdrom;
-	(void)child_disks;
-	(void)child_taps;
-
-	/* Keep this first backend honest: it has only a GIC, timer and PL011. */
-	if (vm->vm_params.vmc_ndisks != 0 ||
-	    vm->vm_params.vmc_nnics != 0 || vm->vm_cdrom != -1) {
-		log_warnx("arm64 guests do not yet support storage or network "
-		    "devices");
+	/* CD-ROM/SCSI is separate from the initial block/network bring-up. */
+	if (vm->vm_cdrom != -1) {
+		log_warnx("arm64 guests do not yet support CD-ROM devices");
 		return (EOPNOTSUPP);
 	}
 	gicv3_init(vm->vm_fd);
 	arm64_timer_init(vm->vm_fd);
 	pl011_init(con_fd, vm->vm_fd);
 	pci_init();
-	return (0);
+	return (virtio_init(vm, child_cdrom, child_disks, child_taps));
 }
 
 void

@@ -35,6 +35,10 @@
 #include "mmio.h"
 #ifdef __aarch64__
 #include "arm64_vm.h"
+/* Serializes the wired-OR of endpoints sharing a platform INTx line. */
+static pthread_mutex_t pci_intx_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int pci_intx_level[ARM64_PCI_NINTX];
+static void pci_intx_update(uint8_t, int);
 #endif
 
 struct pci pci;
@@ -122,7 +126,12 @@ pci_add_bar(uint8_t id, uint32_t type, void *barfn, void *cookie)
 	/* Compute BAR address and add */
 	bar_reg_idx = (PCI_MAPREG_START + (bar_ct * 4)) / 4;
 	if (type == PCI_MAPREG_TYPE_MEM) {
+#ifdef __aarch64__
+		if (pci.pci_next_mmio_bar + VM_PCI_MMIO_BAR_SIZE >
+		    ARM64_PCI_MEM_BASE + ARM64_PCI_MEM_SIZE)
+#else
 		if (pci.pci_next_mmio_bar >= PCI_MMIO_BAR_END)
+#endif
 			return (-1);
 
 		pci.pci_devices[id].pd_cfg_space[bar_reg_idx] =
@@ -152,6 +161,8 @@ pci_add_bar(uint8_t id, uint32_t type, void *barfn, void *cookie)
 		pci.pci_devices[id].pd_bar_ct++;
 	}
 #endif /* __amd64__ */
+	else
+		return (-1);
 
 	return ((int)bar_ct);
 }
@@ -227,8 +238,10 @@ pci_add_device(uint8_t *id, uint16_t vid, uint16_t pid, uint8_t class,
 
 	/* Exceeded max IRQs? */
 	/* XXX we could share IRQs ... */
+#ifdef __amd64__
 	if (pci.pci_next_pic_irq >= PCI_MAX_PIC_IRQS && irq_needed)
 		return (1);
+#endif
 
 	*id = pci.pci_dev_ct;
 	ret = pthread_mutex_init(&pci.pci_devices[*id].pd_mtx, NULL);
@@ -249,8 +262,14 @@ pci_add_device(uint8_t *id, uint16_t vid, uint16_t pid, uint8_t class,
 	pci.pci_devices[*id].pd_csfunc = csfunc;
 
 	if (irq_needed) {
+#ifdef __aarch64__
+		/* INTA at slot N follows the same swizzle as the FDT map. */
+		pci.pci_devices[*id].pd_irq = ARM64_PCI_INTID_BASE +
+		    (*id % ARM64_PCI_NINTX);
+#else
 		pci.pci_devices[*id].pd_irq =
 		    pci_pic_irqs[pci.pci_next_pic_irq];
+#endif
 		pci.pci_devices[*id].pd_int = 1;
 		pci.pci_next_pic_irq++;
 		DPRINTF("assigned irq %d to pci dev %d",
@@ -437,6 +456,44 @@ pci_msi_deliver(uint64_t address, uint32_t data)
 #endif /* __amd64__ */
 }
 
+#ifdef __aarch64__
+/*
+ * The line is high while ANY unmasked endpoint asserts it.  Keeping each
+ * endpoint's latch separately is essential: reading one virtio ISR must not
+ * acknowledge a different device which happens to share the same SPI.
+ * A negative level only recomputes routing after a command-register change.
+ */
+static void
+pci_intx_update(uint8_t id, int level)
+{
+	struct pci_dev *dev;
+	unsigned int i, line = id % ARM64_PCI_NINTX;
+	int asserted = 0;
+
+	pthread_mutex_lock(&pci_intx_mtx);
+	for (i = line; i < pci.pci_dev_ct; i += ARM64_PCI_NINTX) {
+		dev = &pci.pci_devices[i];
+		pthread_mutex_lock(&dev->pd_mtx);
+		if (i == id && level >= 0)
+			dev->pd_intx_asserted = level;
+		if (dev->pd_int && dev->pd_intx_asserted &&
+		    !(dev->pd_cmd & PCI_COMMAND_INTERRUPT_DISABLE))
+			asserted = 1;
+		pthread_mutex_unlock(&dev->pd_mtx);
+	}
+	if (asserted != pci_intx_level[line]) {
+		if (asserted)
+			vcpu_assert_irq(current_vm->vm_fd, 0,
+			    ARM64_PCI_INTID_BASE + line);
+		else
+			vcpu_deassert_irq(current_vm->vm_fd, 0,
+			    ARM64_PCI_INTID_BASE + line);
+		pci_intx_level[line] = asserted;
+	}
+	pthread_mutex_unlock(&pci_intx_mtx);
+}
+#endif
+
 void
 pci_assert_irq(uint8_t id, uint16_t msix_vector)
 {
@@ -448,6 +505,10 @@ pci_assert_irq(uint8_t id, uint16_t msix_vector)
 
 	if (id >= pci.pci_dev_ct)
 		return;
+#ifdef __aarch64__
+	pci_intx_update(id, 1);
+	return;
+#endif
 	dev = &pci.pci_devices[id];
 
 	pthread_mutex_lock(&dev->pd_mtx);
@@ -492,6 +553,10 @@ pci_deassert_irq(uint8_t id)
 
 	if (id >= pci.pci_dev_ct)
 		return;
+#ifdef __aarch64__
+	pci_intx_update(id, 0);
+	return;
+#endif
 	dev = &pci.pci_devices[id];
 
 	pthread_mutex_lock(&dev->pd_mtx);
@@ -624,6 +689,7 @@ pci_init(void)
 	CTASSERT(sizeof(pci.pci_devices[0].pd_cfg_space) <= 256);
 
 #ifdef __aarch64__
+	memset(pci_intx_level, 0, sizeof(pci_intx_level));
 	pci.pci_next_mmio_bar = ARM64_PCI_MEM_BASE;
 #else
 	pci.pci_next_mmio_bar = PCI_MMIO_BAR_BASE;
@@ -651,6 +717,10 @@ pci_handle_mmio(uint32_t vcpu_id, int dir, paddr_t addr, uint8_t size,
 
 	for (i = 0; i < pci.pci_dev_ct; i++) {
 		dev = &pci.pci_devices[i];
+#ifdef __aarch64__
+		if (!(dev->pd_cmd & PCI_COMMAND_MEM_ENABLE))
+			continue;
+#endif
 		for (j = 0; j < dev->pd_bar_ct; j++) {
 			if (dev->pd_bartype[j] != PCI_BAR_TYPE_MMIO)
 				continue;
@@ -691,6 +761,17 @@ pci_config_write(struct pci_dev *dev, uint8_t reg, uint8_t ofs, uint8_t sz,
 	else
 		mask = ((1U << (sz * 8)) - 1) << (ofs * 8);
 	val = (old & ~mask) | ((data << (ofs * 8)) & mask);
+
+#ifdef __aarch64__
+	/* IDs, capabilities, routing and header type describe immutable hardware. */
+	if (reg == PCI_COMMAND_STATUS_REG / 4)
+		val = (old & 0xffff0000) | (val & (PCI_COMMAND_MEM_ENABLE |
+		    PCI_COMMAND_MASTER_ENABLE | PCI_COMMAND_INTERRUPT_DISABLE));
+	else if (reg == PCI_BHLC_REG / 4)
+		val = (old & 0xffff0000) | (val & 0xffff);
+	else if (reg < PCI_MAPREG_START / 4 || reg >= PCI_MAPREG_END / 4)
+		val = old;
+#endif
 
 	if (reg >= PCI_MAPREG_START / 4 && reg < PCI_MAPREG_END / 4) {
 		baridx = reg - PCI_MAPREG_START / 4;
@@ -788,6 +869,8 @@ pci_handle_ecam(int dir, paddr_t addr, uint8_t size, uint64_t *data)
 		pthread_mutex_unlock(&dev->pd_mtx);
 		*data = value >> ((reg & 3) * 8);
 	}
+	if (dir == MMIO_DIR_WRITE && (reg & ~3U) == PCI_COMMAND_STATUS_REG)
+		pci_intx_update(slot, -1);
 	return (0);
 }
 #endif

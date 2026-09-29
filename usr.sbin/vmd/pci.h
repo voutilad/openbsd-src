@@ -115,6 +115,7 @@ struct pci_dev {
 	uint64_t pd_msix_pba;
 	struct pci_msix_entry pd_msix_table[PCI_MSIX_MAX_VECTORS];
 	pthread_mutex_t pd_mtx;
+	int pd_intx_asserted;
 };
 
 struct pci {

@@ -45,6 +45,7 @@
 #include "vioscsi.h"
 #include "virtio.h"
 #include "vmd.h"
+#include "mmio.h"
 
 #define VIRTIO_DEBUG	0
 #ifdef DPRINTF
@@ -109,6 +110,10 @@ static int virtio_io_notify(int, uint16_t, uint32_t *, uint8_t *, void *,
 static int viornd_notifyq(struct virtio_dev *, uint16_t);
 
 static void vmmci_ack(struct virtio_dev *, unsigned int);
+static int virtio_pci_add_bar(uint8_t, pci_iobar_fn_t, struct virtio_dev *);
+#ifdef __aarch64__
+static int virtio_pci_mmio(uint32_t, int, uint32_t, uint8_t, uint64_t *, void *);
+#endif
 
 #if VIRTIO_DEBUG
 static const char *
@@ -864,6 +869,9 @@ vmmci_ctl(struct virtio_dev *dev, unsigned int cmd)
 	struct timeval tv = { 0, 0 };
 	struct vmmci_dev *v = NULL;
 
+	/* Platforms without the legacy control device cannot request shutdown. */
+	if (dev->device_id == 0)
+		return (-1);
 	if (dev->device_id != PCI_PRODUCT_VIRTIO_VMMCI)
 		fatalx("%s: device is not a vmmci device", __func__);
 	v = &dev->vmmci;
@@ -1163,7 +1171,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 	virtio_dev_init(vm, &viornd, id, VIORND_QUEUE_SIZE_DEFAULT,
 	    VIRTIO_RND_QUEUES, VIRTIO_F_VERSION_1);
 
-	bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_io_dispatch,
+	bar_id = virtio_pci_add_bar(id, virtio_io_dispatch,
 	    &viornd);
 	if (bar_id == -1 || bar_id > 0xff) {
 		log_warnx("can't add bar for virtio rng device");
@@ -1197,7 +1205,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			    (VIRTIO_NET_F_CSUM | VIRTIO_NET_F_GUEST_CSUM |
 			     VIRTIO_NET_F_MAC | VIRTIO_F_VERSION_1));
 
-			bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io,
+			bar_id = virtio_pci_add_bar(id, virtio_pci_io,
 			    dev);
 			if (bar_id == -1 || bar_id > 0xff) {
 				log_warnx("can't add bar for virtio net "
@@ -1275,7 +1283,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			    VIRTIO_BLK_QUEUES,
 			    (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SEG_MAX));
 
-			bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io,
+			bar_id = virtio_pci_add_bar(id, virtio_pci_io,
 			    dev);
 			if (bar_id == -1 || bar_id > 0xff) {
 				log_warnx("can't add bar for virtio block "
@@ -1330,7 +1338,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		}
 		virtio_dev_init(vm, dev, id, VIOSCSI_QUEUE_SIZE_DEFAULT,
 		    VIRTIO_SCSI_QUEUES, VIRTIO_F_VERSION_1);
-		bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io, dev);
+		bar_id = virtio_pci_add_bar(id, virtio_pci_io, dev);
 		if (bar_id == -1 || bar_id > 0xff) {
 			log_warnx("can't add bar for vioscsi device");
 			free(dev);
@@ -1361,6 +1369,11 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			return (1);
 		}
 	}
+
+#ifdef __aarch64__
+	/* Only the modern PCI transport is exposed on this platform. */
+	return (0);
+#endif
 
 	/* Virtio 0.9 VMM Control Interface */
 	dev = &vmmci;
@@ -1600,6 +1613,7 @@ virtio_vq_init(struct virtio_dev *dev, size_t idx)
 static void
 virtio_pci_add_intr_caps(uint8_t pci_id, uint16_t num_queues)
 {
+#ifdef __amd64__
 	if (pci_add_msi_capability(pci_id) == -1)
 		fatalx("%s: can't add MSI capability for PCI device %u",
 		    __func__, pci_id);
@@ -1607,7 +1621,60 @@ virtio_pci_add_intr_caps(uint8_t pci_id, uint16_t num_queues)
 	if (pci_add_msix_capability(pci_id, num_queues + 1) == -1)
 		fatalx("%s: can't add MSI-X capability for PCI device %u",
 		    __func__, pci_id);
+#endif
 }
+
+static int
+virtio_pci_add_bar(uint8_t id, pci_iobar_fn_t fn, struct virtio_dev *dev)
+{
+#ifdef __aarch64__
+	return (pci_add_bar(id, PCI_MAPREG_TYPE_MEM, virtio_pci_mmio, dev));
+#else
+	return (pci_add_bar(id, PCI_MAPREG_TYPE_IO, fn, dev));
+#endif
+}
+
+#ifdef __aarch64__
+/*
+ * Only the register transport differs from x86.  Retain the existing device
+ * handlers and their process isolation; the direction encodings of MMIO and
+ * port I/O are opposite.  A native 64-bit access is two ordered 32-bit
+ * accesses, as permitted for the virtio configuration fields we implement.
+ */
+static int
+virtio_pci_mmio(uint32_t cpu, int dir, uint32_t reg, uint8_t size,
+    uint64_t *data, void *cookie)
+{
+	struct virtio_dev *dev = cookie;
+	pci_iobar_fn_t fn;
+	uint64_t lo, hi;
+	uint32_t value;
+	uint8_t intr = 0xff;
+	int error;
+
+	if ((size != 1 && size != 2 && size != 4 && size != 8) ||
+	    (reg & (size - 1)) != 0 || reg > UINT16_MAX - size + 1)
+		return (EINVAL);
+	if (size == 8) {
+		lo = (uint32_t)*data;
+		hi = *data >> 32;
+		error = virtio_pci_mmio(cpu, dir, reg, 4, &lo, cookie);
+		if (error == 0)
+			error = virtio_pci_mmio(cpu, dir, reg + 4, 4, &hi, cookie);
+		if (dir == MMIO_DIR_READ)
+			*data = (uint32_t)lo | (hi << 32);
+		return (error);
+	}
+	fn = dev->device_id == PCI_PRODUCT_VIRTIO_ENTROPY ?
+	    virtio_io_dispatch : virtio_pci_io;
+	value = *data;
+	error = fn(dir == MMIO_DIR_WRITE ? VEI_DIR_OUT : VEI_DIR_IN,
+	    reg, &value, &intr, dev, size);
+	if (dir == MMIO_DIR_READ)
+		*data = value & (UINT32_MAX >> ((4 - size) * 8));
+	return (error);
+}
+#endif
 
 static void
 virtio_pci_add_cap(uint8_t pci_id, uint8_t cfg_type, uint8_t bar_id,
@@ -1637,6 +1704,7 @@ virtio_pci_add_cap(uint8_t pci_id, uint8_t cfg_type, uint8_t bar_id,
 		cap.virtio.length = sizeof(uint8_t);
 		break;
 	case VIRTIO_PCI_CAP_NOTIFY_CFG:
+		cap.virtio.cap_len = sizeof(struct virtio_pci_notify_cap);
 		cap.virtio.offset = VIO1_NOTIFY_BAR_OFFSET;
 		cap.virtio.length = sizeof(uint16_t);
 		cap.notify.notify_off_multiplier = 0;
