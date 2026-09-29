@@ -116,8 +116,17 @@ wait_for 'Setup a user?'
 send ''
 wait_for 'Allow root ssh login?'
 send ''
-wait_for "What timezone are you in? ('?' for list)"
-send ''
+# Some ramdisk builds defer timezone selection until after disk setup.
+i=0
+while [ ${i} -lt "${WAIT_LIMIT:-300}" ]; do
+	grep -Fq 'Available disks are: none.' "${console}" && break
+	if grep -Fq "What timezone are you in? ('?' for list)" "${console}"; then
+		send ''
+		break
+	fi
+	i=$((i + 1))
+	sleep 0.2
+done
 wait_for 'Available disks are: none.'
 wait_for "Which disk is the root disk? ('?' for details)"
 

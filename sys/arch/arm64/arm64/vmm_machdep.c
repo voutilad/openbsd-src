@@ -60,6 +60,8 @@
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 #define VMM_ASYNC_RETRIES	8
+#define VMM_TGRAN16_2_SHIFT	32
+#define VMM_TGRAN16_2_MASK	0xfUL
 
 /* A 16KB table has 2048 descriptors: eleven IPA bits per lookup level. */
 #define VMM_S2_INDEX_MASK	0x7ff
@@ -70,7 +72,7 @@
 	(3UL << 8) | (1UL << 10)) /* normal WB, RW, inner shareable, AF; XN=0 */
 
 /*
- * Experimental hardware tables, separate from the native 4KB pmap which
+ * Initial hardware tables, separate from the native 4KB pmap which
  * still performs UVM/PV bookkeeping and instruction-cache synchronization.
  * The supported single vCPU owns these tables and modifies them only while
  * stopped under vc_lock.  SMP will require VM ownership and a shared lock.
@@ -100,17 +102,6 @@ static const struct kmem_pa_mode arm64_vmm_s2_kp = {
 #define CNTHCTL_EL1PCTEN_VHE	(1 << 10)
 
 static struct vcpu *arm64_vmm_resident[MAXCPUS];
-
-/* Temporary bsd.rd diagnostics; remove after locating the post-root stall. */
-static u_int arm64_vmm_diag_s2_faults;
-static u_int arm64_vmm_diag_s2_windows;
-static u_int arm64_vmm_diag_s2_hits;
-static u_int arm64_vmm_diag_irqs;
-static u_int arm64_vmm_diag_timer_pends;
-static u_int arm64_vmm_diag_wfx;
-static uint64_t arm64_vmm_diag_next;
-static uint64_t arm64_vmm_diag_el0_start;
-static u_int arm64_vmm_diag_vm;
 
 int	arm64_vmm_enter_nvhe(paddr_t);
 int	arm64_vmm_enter_vhe(vaddr_t, int, int, int);
@@ -164,12 +155,27 @@ arm64_vmm_defer_host_timer(struct arm64_vmm_run *run)
 int
 vmm_enabled(void)
 {
-	uint64_t pfr0;
+	uint64_t pfr0, mmfr0, granule;
 
 	if (!arm64_has_el2)
 		return (0);
 	pfr0 = READ_SPECIALREG(id_aa64pfr0_el1);
-	return (ID_AA64PFR0_EL2(pfr0) != ID_AA64PFR0_EL2_NONE);
+	if (ID_AA64PFR0_EL2(pfr0) == ID_AA64PFR0_EL2_NONE)
+		return (0);
+	/*
+	 * Stage-2 support has its own granule field. Zero inherits the stage-1
+	 * field, one means unsupported, and two/three support 48/52-bit tables.
+	 * This initial implementation deliberately uses only 16KB stage 2;
+	 * neither the OpenBSD host nor the guest must change its 4KB stage 1.
+	 */
+	mmfr0 = READ_SPECIALREG(id_aa64mmfr0_el1);
+	granule = (mmfr0 >> VMM_TGRAN16_2_SHIFT) & VMM_TGRAN16_2_MASK;
+	if (granule == 0) {
+		granule = ID_AA64MMFR0_TGRAN16(mmfr0) >>
+		    ID_AA64MMFR0_TGRAN16_SHIFT;
+		return (granule == 1 || granule == 2);
+	}
+	return (granule == 2 || granule == 3);
 }
 
 int
@@ -187,7 +193,7 @@ vmm_attach_machdep(struct device *parent, struct device *self, void *aux)
 	sc->mode = VMM_MODE_STAGE2;
 	sc->max_vpid = 0;
 	rw_init(&sc->vpid_lock, "vpid");
-	printf(": EL2/%s stage-2", arm64_has_el2 == 2 ? "VHE" : "nVHE");
+	printf(": EL2/%s stage-2 (16KB)", arm64_has_el2 == 2 ? "VHE" : "nVHE");
 }
 
 void
@@ -643,10 +649,8 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 	ipa = trunc_page(gpa);
 
 	ptep = arm64_vmm_s2_lookup(vcpu, ipa, 0);
-	if (ptep != NULL && *ptep != 0) {
-		arm64_vmm_diag_s2_hits++;
+	if (ptep != NULL && *ptep != 0)
 		return (0);
-	}
 
 	/*
 	 * Locate the RAM slot containing the fault before calculating the
@@ -706,6 +710,9 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 	 * four constituent host pages. Only this 16KB tree is used by hardware.
 	 * Publish a group only after all its native mappings were installed.
 	 */
+	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
+	/* Keep the invalidation pending even if a later allocation fails. */
+	run->avr_flush_tlb = 1;
 	for (pa = ipa_base; pa < ipa_end; pa += VMM_S2_PAGE_SIZE) {
 		if (!pmap_extract(vcpu->vc_parent->vm_pmap, pa, &hpa) ||
 		    (hpa & VMM_S2_PAGE_MASK) != 0 || hpa >= (1UL << 40))
@@ -716,10 +723,6 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 		KASSERT(*ptep == 0 || *ptep == (hpa | VMM_S2_PAGE | VMM_S2_ATTRS));
 		*ptep = hpa | VMM_S2_PAGE | VMM_S2_ATTRS;
 	}
-	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
-	/* A cached translation fault may survive until the next TLBI. */
-	run->avr_flush_tlb = 1;
-	arm64_vmm_diag_s2_windows++;
 	return (error);
 }
 
@@ -784,10 +787,6 @@ arm64_vmm_load_intr(struct vcpu *vcpu)
 			timer = 0;
 	} else
 		timer = 0;
-	if (timer != 0 &&
-	    (run->avr_ich_lr1_el2 & ICH_LR_STATE_MASK) == 0) {
-		arm64_vmm_diag_timer_pends++;
-	}
 	arm64_vmm_load_lr(&run->avr_ich_lr1_el2, timer);
 }
 
@@ -945,8 +944,7 @@ vm_run(struct vm_run_params *vrp)
 	struct vcpu *vcpu;
 	struct cpu_info *entry_ci;
 	paddr_t ipa, last_ipa = (paddr_t)-1;
-	uint64_t ec, diag_now;
-	u_int diag_phase, diag_mode;
+	uint64_t ec;
 	u_int irq_retries = 0, old, retries = 0;
 	int defer_timer, entry_recovery, error = 0, fast_entry;
 	int ipi_disabled, recovery;
@@ -1008,11 +1006,6 @@ vm_run(struct vm_run_params *vrp)
 	}
 
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
-	if (arm64_vmm_diag_vm != vm->vm_id) {
-		arm64_vmm_diag_vm = vm->vm_id;
-		arm64_vmm_diag_el0_start = 0;
-		arm64_vmm_diag_next = 0;
-	}
 	WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 	/*
 	 * With guest stage 1 disabled, PC is itself the IPA.  Install its
@@ -1060,43 +1053,6 @@ vm_run(struct vm_run_params *vrp)
 		 */
 		if (vcpu->vc_lastcpu != NULL && vcpu->vc_lastcpu != curcpu())
 			run->avr_flush_tlb = 1;
-		/*
-		 * Temporary, self-timed experiment; no new ioctl or instruction
-		 * emulation.  Keep mandatory invalidations in bit 0.  Bits 3:1
-		 * request an additional EL0-entry operation in vmm_support.S:
-		 * 0 = none, 1 = barriers, 2 = stage 1, 3 = stages 1+2,
-		 * 4 = instruction cache only.
-		 *
-		 * Start six 15-second phases at the first observed EL0 entry:
-		 * baseline, barriers, S1, baseline, S1+S2, baseline.  A VM whose
-		 * name contains "reverse" exchanges S1 and S1+S2.  A name containing
-		 * "icache" replaces the S1 operation with IC IALLUIS. Changing phases
-		 * neither pauses the vCPU nor touches its registers/page tables.
-		 */
-		diag_now = READ_SPECIALREG(cntvct_el0);
-		if (arm64_vmm_diag_el0_start == 0 &&
-		    (run->avr_pstate & PSR_M_MASK) == PSR_M_EL0t)
-			arm64_vmm_diag_el0_start = diag_now;
-		diag_phase = 0;
-		if (arm64_vmm_diag_el0_start != 0)
-			diag_phase = MIN(5, (diag_now - arm64_vmm_diag_el0_start) /
-			    (15 * READ_SPECIALREG(cntfrq_el0)));
-		diag_mode = diag_phase == 1 ? 1 :
-		    diag_phase == 2 ? 2 : diag_phase == 4 ? 3 : 0;
-		if (strnstr(vm->vm_name, "reverse", sizeof(vm->vm_name)) != NULL &&
-		    diag_mode >= 2)
-			diag_mode = 5 - diag_mode;
-		if (diag_mode == 2 && strnstr(vm->vm_name, "icache",
-		    sizeof(vm->vm_name)) != NULL)
-			diag_mode = 4;
-		/* Positive control: can combined invalidation reach the installer? */
-		if (strnstr(vm->vm_name, "continuous", sizeof(vm->vm_name)) != NULL)
-			diag_mode = 3;
-		/* Ordinary VMs must never acquire a timed forced-invalidation mode. */
-		if (strncmp(vm->vm_name, "bsd-rd-tlb-", 11) != 0)
-			diag_mode = 0;
-		if ((run->avr_pstate & PSR_M_MASK) == PSR_M_EL0t)
-			run->avr_flush_tlb |= diag_mode << 1;
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());
 		/*
 		 * A guest may use FP/AdvSIMD whenever its CPACR_EL1 permits it.
@@ -1139,47 +1095,6 @@ vm_run(struct vm_run_params *vrp)
 		 */
 		run->avr_flush_tlb = 0;
 		arm64_vmm_save_run(vcpu);
-		if (run->avr_exit == ARM64_VMM_EXIT_IRQ ||
-		    run->avr_exit == ARM64_VMM_EXIT_FIQ)
-			arm64_vmm_diag_irqs++;
-		else if (run->avr_exit == ARM64_VMM_EXIT_SYNC) {
-			ec = ESR_ELx_EXCEPTION(run->avr_esr_el2);
-			if (ec == EXCP_INSN_ABORT_L || ec == EXCP_DATA_ABORT_L)
-				arm64_vmm_diag_s2_faults++;
-			if (ec == EXCP_WFX)
-				arm64_vmm_diag_wfx++;
-		}
-		diag_now = READ_SPECIALREG(cntvct_el0);
-		if (diag_now >= arm64_vmm_diag_next) {
-			arm64_vmm_diag_next = diag_now +
-			    5 * READ_SPECIALREG(cntfrq_el0);
-			printf("vmm diag: vm %u cpu %u pc %llx ps %llx exit %llu "
-			    "esr %llx far %llx hpfar %llx\n", vm->vm_id,
-			    cpu_number(), (unsigned long long)run->avr_pc,
-			    (unsigned long long)run->avr_pstate,
-			    (unsigned long long)run->avr_exit,
-			    (unsigned long long)run->avr_esr_el2,
-			    (unsigned long long)run->avr_far_el2,
-			    (unsigned long long)run->avr_hpfar_el2);
-			printf("vmm diag: faults %u windows %u hits %u irqs %u "
-			    "wfx %u pends %u lr %llx/%llx vmcr %llx\n",
-			    arm64_vmm_diag_s2_faults, arm64_vmm_diag_s2_windows,
-			    arm64_vmm_diag_s2_hits, arm64_vmm_diag_irqs,
-			    arm64_vmm_diag_wfx, arm64_vmm_diag_timer_pends,
-			    (unsigned long long)run->avr_ich_lr0_el2,
-			    (unsigned long long)run->avr_ich_lr1_el2,
-			    (unsigned long long)run->avr_ich_vmcr_el2);
-			printf("vmm diag: timer ctl %llx delta %lld cfg %llx "
-			    "elr %llx sp %llx\n",
-			    (unsigned long long)run->avr_cntv_ctl_el0,
-			    (long long)(run->avr_cntv_cval_el0 -
-			    run->avr_cntvct_el0),
-			    (unsigned long long)READ_ONCE(vcpu->vc_timer_intr),
-			    (unsigned long long)run->avr_elr_el1,
-			    (unsigned long long)run->avr_sp);
-			printf("vmm diag: phase %u mode %u el0_started %u\n",
-			    diag_phase, diag_mode, arm64_vmm_diag_el0_start != 0);
-		}
 		/*
 		 * The EL2 vector has restored the host context without acknowledging
 		 * the interrupt.  Its normal host handler runs before execution gets

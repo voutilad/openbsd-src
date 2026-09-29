@@ -232,7 +232,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	isb
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
 	cbz	x0, .Lvhe_tlb_done
-	tbz	x0, #0, .Lvhe_tlb_experiment
 	/*
 	 * vmm owns this full combined invalidation.  It is required after a
 	 * stage-2 mapping change or vCPU migration.
@@ -241,33 +240,6 @@ ENTRY(arm64_vmm_enter_vhe)
 	 */
 	dsb	ishst
 	tlbi	vmalls12e1is
-	dsb	ish
-	isb
-.Lvhe_tlb_experiment:
-	/*
-	 * Temporary controlled experiment.  The ordinary required flush above
-	 * is unchanged.  For additional operations use identical surrounding
-	 * barriers, replacing only the instruction between them.  TGE is
-	 * already clear and VTTBR selects this guest's translation context.
-	 */
-	lsr	x0, x0, #1
-	cbz	x0, .Lvhe_tlb_done
-	dsb	ishst
-	cmp	x0, #2
-	b.eq	.Lvhe_tlb_s1
-	cmp	x0, #4
-	b.eq	.Lvhe_icache_only
-	cmp	x0, #3
-	b.ne	.Lvhe_tlb_barriers
-	tlbi	vmalls12e1is
-	b	.Lvhe_tlb_barriers
-.Lvhe_tlb_s1:
-	tlbi	vmalle1is
-	b	.Lvhe_tlb_barriers
-.Lvhe_icache_only:
-	/* No translation invalidation: isolate instruction-cache visibility. */
-	ic	ialluis
-.Lvhe_tlb_barriers:
 	dsb	ish
 	isb
 .Lvhe_tlb_done:
