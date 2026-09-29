@@ -966,6 +966,9 @@ vm_run(struct vm_run_params *vrp)
 		if (diag_mode == 2 && strnstr(vm->vm_name, "icache",
 		    sizeof(vm->vm_name)) != NULL)
 			diag_mode = 4;
+		/* Positive control: can combined invalidation reach the installer? */
+		if (strnstr(vm->vm_name, "continuous", sizeof(vm->vm_name)) != NULL)
+			diag_mode = 3;
 		/* Ordinary VMs must never acquire a timed forced-invalidation mode. */
 		if (strncmp(vm->vm_name, "bsd-rd-tlb-", 11) != 0)
 			diag_mode = 0;

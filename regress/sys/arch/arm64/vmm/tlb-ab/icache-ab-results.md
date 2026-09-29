@@ -54,3 +54,28 @@ these recovery events distinct from the measured nested-guest stall.
 The first experiment is committed as 0b40676b on vmm-arm64-tlb-ab. The
 IC-only extension and this result are recorded in a following commit on
 that same diagnostic branch.
+
+## Continuous combined-invalidation control and reduced reproducer
+
+GENERIC.MP#179 kept VMALLS12E1IS enabled at every EL0 re-entry for the
+diagnostic name bsd-rd-tlb-continuous. It reached 211 syscalls and 821 traps,
+then remained at PC 0x409ea3000 for over a minute. A paused page-table walk
+found a valid executable PTE mapping IPA 0x5e100000 and instruction d10883ff,
+the first instruction of the kernel-provided signal trampoline. X0 was 20
+(SIGCHLD). Thus repeated combined invalidation is not a sufficient fix.
+Evidence: /home/dv/vmm-tlb-positive.qVhEoiOT (also copied to the host).
+
+The tlbi regression now adds two controls using a code target in a separate
+16KB physical region (IPA 0x10000). All original 16 cases pass, and executing
+the separate region without touching it as data passes. Reading the region
+as data before executing it fails: one guest translation fault was handled,
+then PC and ELR stay at 0x300000. Guest interrupts are masked, the virtual
+timer is disabled, and both virtual interrupt list registers are empty.
+This isolates data-to-executable permission promotion from the ramdisk,
+timer, and GIC. The regression is committed as 426c0d11.
+
+Next discriminator: the backing allocation is 16KB aligned/contiguous, but
+VTCR.TG0 is still 4KB and the native pmap uses 4KB hardware tables. Test
+actual 16KB stage-2 translation tables against the small reproducer before
+trying another ramdisk boot. A nested KVM granule/permission interaction is
+a hypothesis, not yet a proven root cause.
