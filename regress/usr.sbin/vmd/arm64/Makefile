@@ -8,10 +8,18 @@ regress:
 VMD?=		/usr/sbin/vmd
 VMCTL?=		/usr/sbin/vmctl
 
-CLEANFILES+=	guest.o guest_start.o guest.elf console.out vmd.log
+CLEANFILES+=	guest.o guest_start.o guest.elf console.out vmd.log timer_schedule
 
-REGRESS_TARGETS=	run-regress-fdt-gic-uart
-REGRESS_ROOT_TARGETS=	${REGRESS_TARGETS}
+REGRESS_TARGETS=	run-regress-timer-schedule run-regress-fdt-gic-uart
+REGRESS_ROOT_TARGETS=	run-regress-fdt-gic-uart
+
+VMD_SRC=	${.CURDIR}/../../../../usr.sbin/vmd
+timer_schedule: timer_schedule.c ${VMD_SRC}/arm64_timer.c ${VMD_SRC}/log.c
+	${CC} -Wall -Wextra -I${VMD_SRC} -o $@ \
+	    ${.CURDIR}/timer_schedule.c ${VMD_SRC}/log.c -lpthread -levent
+
+run-regress-timer-schedule: timer_schedule
+	./timer_schedule
 
 guest_start.o: guest.S
 	${CC} -c -o $@ ${.CURDIR}/guest.S
