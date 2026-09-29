@@ -325,6 +325,9 @@ struct arm64_vmm_run {
 struct vcpu {
 	vaddr_t			vc_control_va;	/* [I] EL2 run page */
 	paddr_t			vc_control_pa;	/* [I] */
+	/* Experimental 16KB hardware stage 2; only one vCPU is supported. */
+	struct arm64_vmm_s2_table *vc_s2_root;	/* [v] */
+	struct arm64_vmm_s2_table *vc_s2_tables;	/* [v] */
 	struct vm		*vc_parent;	/* [I] */
 	uint32_t		vc_id;		/* [I] */
 	u_int			vc_state;	/* [a] */

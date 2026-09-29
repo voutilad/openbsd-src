@@ -20,6 +20,7 @@
 #include <sys/atomic.h>
 #include <sys/device.h>
 #include <sys/ioctl.h>
+#include <sys/malloc.h>
 #include <sys/pledge.h>
 #include <sys/proc.h>
 
@@ -41,14 +42,15 @@
 #define EXCP_HVC64		0x16
 
 #define VTCR_T0SZ_39		(64 - 39)
-#define VTCR_SL0_L1		(1UL << 6)
+#define VTCR_SL0_L1		(2UL << 6) /* L1 for a 16KB granule */
 #define VTCR_IRGN0_WBWA		(1UL << 8)
 #define VTCR_ORGN0_WBWA		(1UL << 10)
 #define VTCR_SH0_INNER		(3UL << 12)
+#define VTCR_TG0_16KB		(2UL << 14)
 #define VTCR_PS_40BIT		(2UL << 16)
 #define VTCR_RES1		(1UL << 31)
 #define VTCR_STAGE2_39		(VTCR_RES1 | VTCR_PS_40BIT | \
-	VTCR_SH0_INNER | VTCR_ORGN0_WBWA | VTCR_IRGN0_WBWA | \
+	VTCR_TG0_16KB | VTCR_SH0_INNER | VTCR_ORGN0_WBWA | VTCR_IRGN0_WBWA | \
 	VTCR_SL0_L1 | VTCR_T0SZ_39)
 
 #define HPFAR_FIPA_MASK		0xfffffffff0UL
@@ -58,6 +60,35 @@
 #define VMM_S2_PAGE_MASK	(VMM_S2_PAGE_SIZE - 1)
 #define VMM_S2_FAULT_SIZE	(256 * 1024)
 #define VMM_ASYNC_RETRIES	8
+
+/* A 16KB table has 2048 descriptors: eleven IPA bits per lookup level. */
+#define VMM_S2_INDEX_MASK	0x7ff
+#define VMM_S2_PA_MASK		0x0000ffffffffc000UL
+#define VMM_S2_TABLE		3UL
+#define VMM_S2_PAGE		3UL
+#define VMM_S2_ATTRS		((0xfUL << 2) | (3UL << 6) | \
+	(3UL << 8) | (1UL << 10)) /* normal WB, RW, inner shareable, AF; XN=0 */
+
+/*
+ * Experimental hardware tables, separate from the native 4KB pmap which
+ * still performs UVM/PV bookkeeping and instruction-cache synchronization.
+ * The supported single vCPU owns these tables and modifies them only while
+ * stopped under vc_lock.  SMP will require VM ownership and a shared lock.
+ * The allocation list both resolves child PAs to kernel VAs and permits
+ * complete teardown, including a partially populated tree after an error.
+ */
+struct arm64_vmm_s2_table {
+	struct arm64_vmm_s2_table *next;
+	uint64_t		*pte;
+	paddr_t			pa;
+};
+
+static const struct kmem_pa_mode arm64_vmm_s2_kp = {
+	.kp_constraint = &no_constraint,
+	.kp_align = VMM_S2_PAGE_SIZE,
+	.kp_maxseg = 1,
+	.kp_zero = 1
+};
 
 /* Atomic software form of the one interrupt selected by userland. */
 #define VMM_INTR_VALID		(1UL << 63)
@@ -86,6 +117,8 @@ int	arm64_vmm_enter_vhe(vaddr_t, int, int, int);
 
 static int	arm64_vmm_fault_page(struct vcpu *, paddr_t);
 static int	arm64_vmm_alloc_memory(struct vm *);
+static struct arm64_vmm_s2_table *arm64_vmm_s2_alloc(struct vcpu *);
+static uint64_t *arm64_vmm_s2_lookup(struct vcpu *, paddr_t, int);
 static vaddr_t	arm64_vmm_translate_gpa(struct vm *, paddr_t);
 static int	arm64_vmm_intr_pending(struct vm_intr_params *);
 static int	arm64_vmm_irqcfg(struct vm_irqcfg_params *);
@@ -315,7 +348,8 @@ vm_impl_deinit(struct vm *vm)
  * Allocate guest RAM in aligned 16KB runs.  A 16KB stage-2 implementation
  * can only compose four 4KB mappings when their input and output offsets
  * agree.  Keeping each run physically contiguous and aligned satisfies that
- * requirement while retaining the kernel's native 4KB page tables.
+ * requirement. The native pmap records each 4KB constituent, while the
+ * hardware stage-2 tree maps the complete group with one 16KB descriptor.
  */
 static int
 arm64_vmm_alloc_memory(struct vm *vm)
@@ -364,6 +398,64 @@ arm64_vmm_alloc_memory(struct vm *vm)
 	return (0);
 }
 
+static struct arm64_vmm_s2_table *
+arm64_vmm_s2_alloc(struct vcpu *vcpu)
+{
+	struct arm64_vmm_s2_table *table;
+
+	table = malloc(sizeof(*table), M_DEVBUF, M_WAITOK | M_ZERO);
+	table->pte = km_alloc(VMM_S2_PAGE_SIZE, &kv_any, &arm64_vmm_s2_kp,
+	    &kd_waitok);
+	if (table->pte == NULL) {
+		free(table, M_DEVBUF, sizeof(*table));
+		return (NULL);
+	}
+	if (!pmap_extract(pmap_kernel(), (vaddr_t)table->pte, &table->pa) ||
+	    (table->pa & VMM_S2_PAGE_MASK) != 0 || table->pa >= (1UL << 40)) {
+		km_free(table->pte, VMM_S2_PAGE_SIZE, &kv_any, &arm64_vmm_s2_kp);
+		free(table, M_DEVBUF, sizeof(*table));
+		return (NULL);
+	}
+	table->next = vcpu->vc_s2_tables;
+	vcpu->vc_s2_tables = table;
+	return (table);
+}
+
+/* Return the L3 slot for an IPA, allocating absent L2/L3 tables if asked. */
+static uint64_t *
+arm64_vmm_s2_lookup(struct vcpu *vcpu, paddr_t ipa, int create)
+{
+	struct arm64_vmm_s2_table *table = vcpu->vc_s2_root, *child;
+	uint64_t *ptep;
+	int shift;
+
+	if (ipa >= (1UL << 39))
+		return (NULL);
+	/* L1 consumes bits 38:36, L2 bits 35:25, and L3 bits 24:14. */
+	for (shift = 36; shift > 14; shift -= 11) {
+		ptep = &table->pte[(ipa >> shift) & VMM_S2_INDEX_MASK];
+		if (*ptep == 0) {
+			if (!create)
+				return (NULL);
+			child = arm64_vmm_s2_alloc(vcpu);
+			if (child == NULL)
+				return (NULL);
+			/* Publish a completely zeroed child, never stale entries. */
+			membar_producer();
+			*ptep = child->pa | VMM_S2_TABLE;
+		} else {
+			for (child = vcpu->vc_s2_tables; child != NULL;
+			    child = child->next) {
+				if (child->pa == (*ptep & VMM_S2_PA_MASK))
+					break;
+			}
+			KASSERT(child != NULL);
+		}
+		table = child;
+	}
+	return (&table->pte[(ipa >> 14) & VMM_S2_INDEX_MASK]);
+}
+
 int
 vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 {
@@ -380,6 +472,12 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 		return (ENOMEM);
 	if (!pmap_extract(pmap_kernel(), vcpu->vc_control_va,
 	    &vcpu->vc_control_pa)) {
+		km_free((void *)vcpu->vc_control_va, PAGE_SIZE, &kv_page, &kp_zero);
+		vcpu->vc_control_va = 0;
+		return (ENOMEM);
+	}
+	vcpu->vc_s2_root = arm64_vmm_s2_alloc(vcpu);
+	if (vcpu->vc_s2_root == NULL) {
 		km_free((void *)vcpu->vc_control_va, PAGE_SIZE, &kv_page, &kp_zero);
 		vcpu->vc_control_va = 0;
 		return (ENOMEM);
@@ -412,6 +510,7 @@ vcpu_init(struct vcpu *vcpu, struct vm_create_params *vcp)
 void
 vcpu_deinit(struct vcpu *vcpu)
 {
+	struct arm64_vmm_s2_table *table;
 	int i;
 
 	for (i = 0; i < MAXCPUS; i++) {
@@ -423,6 +522,13 @@ vcpu_deinit(struct vcpu *vcpu)
 		    &kp_zero);
 		vcpu->vc_control_va = 0;
 	}
+	/* No vCPU can re-enter once common VM teardown reaches this point. */
+	while ((table = vcpu->vc_s2_tables) != NULL) {
+		vcpu->vc_s2_tables = table->next;
+		km_free(table->pte, VMM_S2_PAGE_SIZE, &kv_any, &arm64_vmm_s2_kp);
+		free(table, M_DEVBUF, sizeof(*table));
+	}
+	vcpu->vc_s2_root = NULL;
 }
 
 int
@@ -529,13 +635,15 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 	struct proc *p = curproc;
 	struct arm64_vmm_run *run;
 	struct vm_mem_range *vmr = NULL;
-	paddr_t hpa, ipa, ipa_base, ipa_end, mapped, pa;
+	paddr_t hpa, ipa, ipa_base, ipa_end, pa;
+	uint64_t *ptep;
 	vaddr_t hva;
 	int error, i;
 
 	ipa = trunc_page(gpa);
 
-	if (pmap_extract(vcpu->vc_parent->vm_pmap, ipa, &mapped)) {
+	ptep = arm64_vmm_s2_lookup(vcpu, ipa, 0);
+	if (ptep != NULL && *ptep != 0) {
 		arm64_vmm_diag_s2_hits++;
 		return (0);
 	}
@@ -592,6 +700,21 @@ arm64_vmm_fault_page(struct vcpu *vcpu, paddr_t gpa)
 		    PROT_READ | PROT_WRITE | PROT_EXEC);
 		if (error)
 			return (error);
+	}
+	/*
+	 * Native mappings above retain accounting and cache maintenance for all
+	 * four constituent host pages. Only this 16KB tree is used by hardware.
+	 * Publish a group only after all its native mappings were installed.
+	 */
+	for (pa = ipa_base; pa < ipa_end; pa += VMM_S2_PAGE_SIZE) {
+		if (!pmap_extract(vcpu->vc_parent->vm_pmap, pa, &hpa) ||
+		    (hpa & VMM_S2_PAGE_MASK) != 0 || hpa >= (1UL << 40))
+			return (EFAULT);
+		ptep = arm64_vmm_s2_lookup(vcpu, pa, 1);
+		if (ptep == NULL)
+			return (ENOMEM);
+		KASSERT(*ptep == 0 || *ptep == (hpa | VMM_S2_PAGE | VMM_S2_ATTRS));
+		*ptep = hpa | VMM_S2_PAGE | VMM_S2_ATTRS;
 	}
 	run = (struct arm64_vmm_run *)vcpu->vc_control_va;
 	/* A cached translation fault may survive until the next TLBI. */
@@ -695,7 +818,7 @@ arm64_vmm_load_run(struct vcpu *vcpu, int load_intr)
 	run->avr_tpidr_el0 = vrs->vrs_tpidr_el0;
 	run->avr_tpidrro_el0 = vrs->vrs_tpidrro_el0;
 	run->avr_tpidr_el1 = vrs->vrs_tpidr_el1;
-	run->avr_vttbr_el2 = vcpu->vc_parent->vm_pmap->pm_pt0pa |
+	run->avr_vttbr_el2 = vcpu->vc_s2_root->pa |
 	    ((uint64_t)(vcpu->vc_parent->vm_id & 0xff) << VTTBR_VMID_SHIFT);
 	run->avr_vtcr_el2 = VTCR_STAGE2_39;
 	/*
