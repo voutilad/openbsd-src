@@ -529,6 +529,8 @@ vcpu_reset_regs(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	run->avr_ich_vmcr_el2 = 0;
 	run->avr_ich_lr0_el2 = 0;
 	run->avr_ich_lr1_el2 = 0;
+	memset(run->avr_ich_ap0r, 0, sizeof(run->avr_ich_ap0r));
+	memset(run->avr_ich_ap1r, 0, sizeof(run->avr_ich_ap1r));
 	run->avr_cntv_ctl_el0 = 0;
 	run->avr_cntv_cval_el0 = 0;
 	run->avr_cntvct_el0 = 0;

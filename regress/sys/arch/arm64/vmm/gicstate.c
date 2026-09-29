@@ -145,9 +145,21 @@ main(void)
 		check_priority(&a, PRIORITY, "resumed active A");
 		run_guest(&a);
 		check_priority(&a, 0xff, "A after EOIR");
+		/* RESETCPU must also clear priorities without relying on an EOI. */
+		reset_guest(&a);
+		run_guest(&a);
+		intr.vip_level = VMM_INTR_LEVEL_HIGH;
+		if (ioctl(a.fd, VMM_IOC_INTR, &intr) == -1)
+			err(1, "assert before reset");
+		run_guest(&a);
+		check_priority(&a, PRIORITY, "active before reset");
+		reset_guest(&a);
+		run_guest(&a);
+		check_priority(&a, 0xff, "reset active A");
 	}
 	close(a.fd);
 	close(b.fd);
-	printf("GIC_STATE_PASS: active priorities isolated across 32 VM switches\n");
+	printf("GIC_STATE_PASS: active priorities isolated across 32 VM "
+	    "switches and resets\n");
 	return (0);
 }

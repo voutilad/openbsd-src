@@ -26,6 +26,70 @@
 #define VMM_HVC_ENTER	0x4f42
 
 /*
+ * IAR sets an active-priority bit as well as changing the LR's state; EOIR
+ * drops that priority.  Saving LRs alone loses this separate context on CPU
+ * migration and leaks it between VMs.  Save both groups even though vmd
+ * currently delivers only Group 1.  PREbits is the number of implemented
+ * preemption bits minus one: register 0 always exists, register 1 needs six
+ * bits, and registers 2/3 need seven.  Accessing an absent register is UNDEF.
+ *
+ * These macros clobber x0/x1 only.  Their caller has disabled exceptions and
+ * supplies the run-page base and the start of its two four-register arrays.
+ */
+	.macro save_aprs base, ap0, ap1
+	ldr	x1, [\base, #AVR_ICH_PREBITS]
+	mrs	x0, ICH_AP0R0_EL2
+	str	x0, [\base, #\ap0]
+	mrs	x0, ICH_AP1R0_EL2
+	str	x0, [\base, #\ap1]
+	cmp	x1, #5
+	b.lo	.Lsave_aprs_done\@
+	mrs	x0, ICH_AP0R1_EL2
+	str	x0, [\base, #(\ap0 + 8)]
+	mrs	x0, ICH_AP1R1_EL2
+	str	x0, [\base, #(\ap1 + 8)]
+	b.eq	.Lsave_aprs_done\@
+	mrs	x0, ICH_AP0R2_EL2
+	str	x0, [\base, #(\ap0 + 16)]
+	mrs	x0, ICH_AP0R3_EL2
+	str	x0, [\base, #(\ap0 + 24)]
+	mrs	x0, ICH_AP1R2_EL2
+	str	x0, [\base, #(\ap1 + 16)]
+	mrs	x0, ICH_AP1R3_EL2
+	str	x0, [\base, #(\ap1 + 24)]
+.Lsave_aprs_done\@:
+	.endm
+
+	.macro restore_aprs base, ap0, ap1
+	/* The architecture requires Group 0 to be restored before Group 1. */
+	ldr	x1, [\base, #AVR_ICH_PREBITS]
+	ldr	x0, [\base, #\ap0]
+	msr	ICH_AP0R0_EL2, x0
+	cmp	x1, #5
+	b.lo	.Lrestore_ap1\@
+	ldr	x0, [\base, #(\ap0 + 8)]
+	msr	ICH_AP0R1_EL2, x0
+	b.eq	.Lrestore_ap1\@
+	ldr	x0, [\base, #(\ap0 + 16)]
+	msr	ICH_AP0R2_EL2, x0
+	ldr	x0, [\base, #(\ap0 + 24)]
+	msr	ICH_AP0R3_EL2, x0
+.Lrestore_ap1\@:
+	ldr	x0, [\base, #\ap1]
+	msr	ICH_AP1R0_EL2, x0
+	cmp	x1, #5
+	b.lo	.Lrestore_aprs_done\@
+	ldr	x0, [\base, #(\ap1 + 8)]
+	msr	ICH_AP1R1_EL2, x0
+	b.eq	.Lrestore_aprs_done\@
+	ldr	x0, [\base, #(\ap1 + 16)]
+	msr	ICH_AP1R2_EL2, x0
+	ldr	x0, [\base, #(\ap1 + 24)]
+	msr	ICH_AP1R3_EL2, x0
+.Lrestore_aprs_done\@:
+	.endm
+
+/*
  * Enter EL2 with x0 holding the physical address of struct arm64_vmm_run.
  * OpenBSD keeps its per-CPU pointer in the platform register x18.  Preserve
  * it along with the AAPCS64 callee-saved registers before the guest replaces
@@ -153,6 +217,10 @@ ENTRY(arm64_vmm_enter_vhe)
 	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
 	mrs	x0, ICH_LR1_EL2
 	str	x0, [x17, #AVR_HOST_ICH_LR1_EL2]
+	mrs	x0, ICH_VTR_EL2
+	ubfx	x0, x0, #26, #3
+	str	x0, [x17, #AVR_ICH_PREBITS]
+	save_aprs x17, AVR_HOST_ICH_AP0R, AVR_HOST_ICH_AP1R
 	/*
 	 * API/APK let the guest execute pointer-authentication instructions and
 	 * write the key registers directly.  The keys are not banked, so save the
@@ -204,6 +272,7 @@ ENTRY(arm64_vmm_enter_vhe)
 	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_LR1_EL2]
 	msr	ICH_LR1_EL2, x0
+	restore_aprs x17, AVR_ICH_AP0R, AVR_ICH_AP1R
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 
@@ -498,6 +567,10 @@ ENTRY_NP(vmm_hyp_sync)
 	str	x0, [x17, #AVR_HOST_ICH_LR0_EL2]
 	mrs	x0, ICH_LR1_EL2
 	str	x0, [x17, #AVR_HOST_ICH_LR1_EL2]
+	mrs	x0, ICH_VTR_EL2
+	ubfx	x0, x0, #26, #3
+	str	x0, [x17, #AVR_ICH_PREBITS]
+	save_aprs x17, AVR_HOST_ICH_AP0R, AVR_HOST_ICH_AP1R
 	/* Save the nVHE host's five 128-bit pointer-authentication keys. */
 	add	x16, x17, #AVR_HOST_PAUTH
 	mrs	x0, apiakeylo_el1
@@ -529,6 +602,7 @@ ENTRY_NP(vmm_hyp_sync)
 	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x17, #AVR_ICH_LR1_EL2]
 	msr	ICH_LR1_EL2, x0
+	restore_aprs x17, AVR_ICH_AP0R, AVR_ICH_AP1R
 	ldr	x0, [x17, #AVR_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x17, #AVR_FLUSH_TLB]
@@ -892,7 +966,8 @@ END(vmm_hyp_serror)
 	/*
 	 * VMCR retains PMR, BPR, and group enable.  Either LR may have moved from
 	 * pending to active or invalid when the guest executed IAR/EOIR, so capture
-	 * all three registers before restoring the host virtual CPU interface.
+	 * these and the independent active priorities before restoring the host
+	 * virtual CPU interface, including on the short asynchronous retry path.
 	 */
 	mrs	x0, ICH_VMCR_EL2
 	str	x0, [x18, #AVR_ICH_VMCR_EL2]
@@ -900,6 +975,7 @@ END(vmm_hyp_serror)
 	str	x0, [x18, #AVR_ICH_LR0_EL2]
 	mrs	x0, ICH_LR1_EL2
 	str	x0, [x18, #AVR_ICH_LR1_EL2]
+	save_aprs x18, AVR_ICH_AP0R, AVR_ICH_AP1R
 	/* Capture the EL2 syndrome after all guest-visible EL1 state is safe. */
 	mrs	x0, esr_el2
 	str	x0, [x18, #AVR_ESR_EL2]
@@ -968,6 +1044,7 @@ END(vmm_hyp_serror)
 	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_LR1_EL2]
 	msr	ICH_LR1_EL2, x0
+	restore_aprs x18, AVR_HOST_ICH_AP0R, AVR_HOST_ICH_AP1R
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]
@@ -1039,6 +1116,7 @@ END(vmm_hyp_serror)
 	msr	ICH_LR0_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_ICH_LR1_EL2]
 	msr	ICH_LR1_EL2, x0
+	restore_aprs x18, AVR_HOST_ICH_AP0R, AVR_HOST_ICH_AP1R
 	ldr	x0, [x18, #AVR_HOST_ICH_HCR_EL2]
 	msr	ICH_HCR_EL2, x0
 	ldr	x0, [x18, #AVR_HOST_HCR_EL2]

@@ -269,6 +269,11 @@ struct arm64_vmm_run {
 	/* LR0 carries userland devices; LR1 is reserved for the virtual timer. */
 	uint64_t	avr_ich_lr0_el2;
 	uint64_t	avr_ich_lr1_el2;
+	/* Active priorities are independent of the LR pending/active state. */
+	uint64_t	avr_ich_ap0r[4];
+	uint64_t	avr_ich_ap1r[4];
+	/* Current CPU's ICH_VTR_EL2.PREbits, sampled with its host state. */
+	uint64_t	avr_ich_prebits;
 	uint64_t	avr_mode;
 	uint64_t	avr_exit;
 	/* Pending vmm-owned combined stage-1/stage-2 invalidation. */
@@ -318,6 +323,8 @@ struct arm64_vmm_run {
 	uint64_t	avr_host_ich_vmcr_el2;
 	uint64_t	avr_host_ich_lr0_el2;
 	uint64_t	avr_host_ich_lr1_el2;
+	uint64_t	avr_host_ich_ap0r[4];
+	uint64_t	avr_host_ich_ap1r[4];
 	/* Pointer-authentication keys are shared hardware state. */
 	uint64_t	avr_host_pauth[10] __aligned(16);
 };
