@@ -80,7 +80,6 @@ main(void)
 	struct vm_resetcpu_params reset;
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
-	struct vm_terminate_params term;
 	struct sigaction sa;
 	char *mem;
 	pid_t child = -1;
@@ -97,12 +96,10 @@ main(void)
 	create.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
 	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1)
 		err(1, "VMM_IOC_CREATE");
+	close(fd);
+	fd = create.vcp_fd;
 
 	memset(&share, 0, sizeof(share));
-	share.vsp_vm_id = create.vcp_id;
-	share.vsp_nmemranges = create.vcp_nmemranges;
-	memcpy(share.vsp_memranges, create.vcp_memranges,
-	    sizeof(create.vcp_memranges));
 	if (ioctl(fd, VMM_IOC_SHAREMEM, &share) == -1) {
 		warn("VMM_IOC_SHAREMEM");
 		goto out;
@@ -115,7 +112,6 @@ main(void)
 	__builtin___clear_cache(mem, mem + GUEST_MEM_SIZE);
 
 	memset(&reset, 0, sizeof(reset));
-	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_sp = GUEST_MEM_SIZE;
 	/* Deliberately omit PSR_I so the asserted virtual IRQ is deliverable. */
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_A | PSR_D |
@@ -144,7 +140,6 @@ main(void)
 		/* Let the parent enter its busy guest before issuing the kick. */
 		usleep(250000);
 		memset(&intr, 0, sizeof(intr));
-		intr.vip_vm_id = create.vcp_id;
 		intr.vip_intr = GUEST_INTID;
 		intr.vip_priority = 0;
 		intr.vip_level = VMM_INTR_LEVEL_HIGH;
@@ -155,7 +150,6 @@ main(void)
 
 	memset(&vmexit, 0, sizeof(vmexit));
 	memset(&run, 0, sizeof(run));
-	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
 	/* Host IRQ yields are transparent; only the guest's HVC ends the loop. */
 	alarm(5);
@@ -198,16 +192,53 @@ main(void)
 		goto out;
 	}
 
+	/*
+	 * Queue a line while stopped, then issue the generic pause/shutdown
+	 * kick before any guest entry can consume it. The IRQ must survive.
+	 */
+	if (ioctl(fd, VMM_IOC_RESETCPU, &reset) == -1) {
+		warn("RESETCPU before kick check");
+		goto out;
+	}
+	memset(&intr, 0, sizeof(intr));
+	intr.vip_intr = GUEST_INTID;
+	intr.vip_level = VMM_INTR_LEVEL_HIGH;
+	if (ioctl(fd, VMM_IOC_INTR, &intr) == -1) {
+		warn("assert before kick");
+		goto out;
+	}
+	intr.vip_level = VMM_INTR_LEVEL_KICK;
+	if (ioctl(fd, VMM_IOC_INTR, &intr) == -1) {
+		warn("kick");
+		goto out;
+	}
+	memset(&vmexit, 0, sizeof(vmexit));
+	alarm(5);
+	for (;;) {
+		if (ioctl(fd, VMM_IOC_RUN, &run) == -1) {
+			warn("RUN after kick");
+			goto out;
+		}
+		if (run.vrp_exit_reason != VM_EXIT_NONE || alarm_fired)
+			break;
+	}
+	alarm(0);
+	if (alarm_fired || run.vrp_exit_reason != VM_EXIT_HVC ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X0] != GUEST_RESULT ||
+	    vmexit.vrs.vrs_gprs[VCPU_REGS_X1] != GUEST_INTID) {
+		warnx("kick lost the queued IRQ");
+		goto out;
+	}
+
 	/* Lower the level-triggered line just as a userland GIC eventually will. */
 	memset(&intr, 0, sizeof(intr));
-	intr.vip_vm_id = create.vcp_id;
 	intr.vip_intr = GUEST_INTID;
 	intr.vip_level = VMM_INTR_LEVEL_LOW;
 	if (ioctl(fd, VMM_IOC_INTR, &intr) == -1) {
 		warn("VMM_IOC_INTR clear");
 		goto out;
 	}
-	printf("VMM_IOC_INTR delivered INTID %d through hardware IAR/EOIR\n",
+	printf("VMM_IOC_INTR delivered INTID %d and preserved it across a kick\n",
 	    GUEST_INTID);
 	ret = 0;
 
@@ -215,12 +246,9 @@ out:
 	alarm(0);
 	if (child != -1 && waitpid(child, &status, 0) == -1)
 		warn("waitpid");
-	memset(&term, 0, sizeof(term));
-	term.vtp_vm_id = create.vcp_id;
-	if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
-		warn("VMM_IOC_TERM");
+	if (close(fd) == -1) {
+		warn("close VM");
 		ret = 1;
 	}
-	close(fd);
 	return (ret);
 }

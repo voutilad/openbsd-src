@@ -88,7 +88,6 @@ main(void)
 	struct vm_resetcpu_params reset;
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
-	struct vm_terminate_params term;
 	struct sigaction sa;
 	int fd, rv, ret = 1, yields = 0;
 
@@ -103,12 +102,10 @@ main(void)
 	create.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
 	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1)
 		err(1, "VMM_IOC_CREATE");
+	close(fd);
+	fd = create.vcp_fd;
 
 	memset(&share, 0, sizeof(share));
-	share.vsp_vm_id = create.vcp_id;
-	share.vsp_nmemranges = create.vcp_nmemranges;
-	memcpy(share.vsp_memranges, create.vcp_memranges,
-	    sizeof(create.vcp_memranges));
 	if (ioctl(fd, VMM_IOC_SHAREMEM, &share) == -1) {
 		warn("VMM_IOC_SHAREMEM");
 		goto out;
@@ -120,7 +117,6 @@ main(void)
 	    (char *)create.vcp_memranges[0].vmr_va + sizeof(guest_code));
 
 	memset(&reset, 0, sizeof(reset));
-	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_sp = PAGE_SIZE;
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
@@ -140,7 +136,6 @@ main(void)
 
 	memset(&exit, 0, sizeof(exit));
 	memset(&run, 0, sizeof(run));
-	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &exit;
 	/*
 	 * VM_EXIT_NONE is the arm64 API's host-interrupt yield.  Retry it until
@@ -181,12 +176,9 @@ main(void)
 	ret = 0;
 
 out:
-	memset(&term, 0, sizeof(term));
-	term.vtp_vm_id = create.vcp_id;
-	if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
-		warn("VMM_IOC_TERM");
+	if (close(fd) == -1) {
+		warn("close VM");
 		ret = 1;
 	}
-	close(fd);
 	return (ret);
 }

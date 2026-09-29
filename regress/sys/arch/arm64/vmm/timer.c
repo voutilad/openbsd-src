@@ -93,7 +93,6 @@ main(void)
 	struct vm_resetcpu_params reset;
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
-	struct vm_terminate_params term;
 	struct sigaction sa;
 	char *mem;
 	int error, fd, ret = 1;
@@ -109,12 +108,10 @@ main(void)
 	create.vcp_memranges[0].vmr_size = GUEST_MEM_SIZE;
 	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1)
 		err(1, "VMM_IOC_CREATE");
+	close(fd);
+	fd = create.vcp_fd;
 
 	memset(&share, 0, sizeof(share));
-	share.vsp_vm_id = create.vcp_id;
-	share.vsp_nmemranges = create.vcp_nmemranges;
-	memcpy(share.vsp_memranges, create.vcp_memranges,
-	    sizeof(create.vcp_memranges));
 	if (ioctl(fd, VMM_IOC_SHAREMEM, &share) == -1) {
 		warn("VMM_IOC_SHAREMEM");
 		goto out;
@@ -124,7 +121,6 @@ main(void)
 	__builtin___clear_cache(mem, mem + sizeof(guest_code));
 
 	memset(&reset, 0, sizeof(reset));
-	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_sp = GUEST_MEM_SIZE;
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X3] = CNTKCTL_EL0VCTEN;
 	reset.vrp_init_state.vrs_gprs[VCPU_REGS_X5] = TVAL_VALUE;
@@ -145,7 +141,6 @@ main(void)
 	}
 	memset(&vmexit, 0, sizeof(vmexit));
 	memset(&run, 0, sizeof(run));
-	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
 	alarm(5);
 
@@ -175,12 +170,9 @@ main(void)
 out_alarm:
 	alarm(0);
 out:
-	memset(&term, 0, sizeof(term));
-	term.vtp_vm_id = create.vcp_id;
-	if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
-		warn("VMM_IOC_TERM");
+	if (close(fd) == -1) {
+		warn("close VM");
 		ret = 1;
 	}
-	close(fd);
 	return (ret);
 }

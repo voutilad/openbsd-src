@@ -107,19 +107,18 @@ run_to_exit(int fd, struct vm_run_params *run)
 }
 
 static int
-run_case(int fd, const struct tlbi_case *tc, int prepare)
+run_case(int vmm_fd, const struct tlbi_case *tc, int prepare)
 {
 	struct vm_create_params create;
 	struct vm_exit vmexit;
 	struct vm_resetcpu_params reset;
 	struct vm_run_params run;
 	struct vm_sharemem_params share;
-	struct vm_terminate_params term;
 	uint64_t *l1, *l2, *l3;
 	uint64_t target_pte, target_va, target_pa;
 	size_t mem_size;
 	char *mem;
-	int created = 0, error, i, ret = 1;
+	int fd, error, i, ret = 1;
 
 	memset(&create, 0, sizeof(create));
 	snprintf(create.vcp_name, sizeof(create.vcp_name), "tlbi-%s-%d",
@@ -134,17 +133,13 @@ run_case(int fd, const struct tlbi_case *tc, int prepare)
 	create.vcp_ncpus = 1;
 	create.vcp_nmemranges = 1;
 	create.vcp_memranges[0].vmr_size = mem_size;
-	if (ioctl(fd, VMM_IOC_CREATE, &create) == -1) {
+	if (ioctl(vmm_fd, VMM_IOC_CREATE, &create) == -1) {
 		warn("VMM_IOC_CREATE %s", tc->tc_name);
 		return (1);
 	}
-	created = 1;
+	fd = create.vcp_fd;
 
 	memset(&share, 0, sizeof(share));
-	share.vsp_vm_id = create.vcp_id;
-	share.vsp_nmemranges = create.vcp_nmemranges;
-	memcpy(share.vsp_memranges, create.vcp_memranges,
-	    sizeof(create.vcp_memranges));
 	if (ioctl(fd, VMM_IOC_SHAREMEM, &share) == -1) {
 		warn("VMM_IOC_SHAREMEM");
 		goto out;
@@ -185,7 +180,6 @@ run_case(int fd, const struct tlbi_case *tc, int prepare)
 	__builtin___clear_cache(mem, mem + mem_size);
 
 	memset(&reset, 0, sizeof(reset));
-	reset.vrp_vm_id = create.vcp_id;
 	reset.vrp_init_state.vrs_pc = BOOT_PA;
 	reset.vrp_init_state.vrs_pstate = PSR_F | PSR_I | PSR_A | PSR_D |
 	    PSR_M_EL1h;
@@ -226,7 +220,6 @@ run_case(int fd, const struct tlbi_case *tc, int prepare)
 
 	memset(&vmexit, 0, sizeof(vmexit));
 	memset(&run, 0, sizeof(run));
-	run.vrp_vm_id = create.vcp_id;
 	run.vrp_exit = &vmexit;
 	alarm_fired = 0;
 	printf("case %s prepare=%d target_pa=0x%llx\n", tc->tc_name,
@@ -258,13 +251,9 @@ run_case(int fd, const struct tlbi_case *tc, int prepare)
 
 	ret = 0;
 out:
-	if (created) {
-		memset(&term, 0, sizeof(term));
-		term.vtp_vm_id = create.vcp_id;
-		if (ioctl(fd, VMM_IOC_TERM, &term) == -1) {
-			warn("VMM_IOC_TERM %s", tc->tc_name);
-			ret = 1;
-		}
+	if (close(fd) == -1) {
+		warn("close VM %s", tc->tc_name);
+		ret = 1;
 	}
 	return (ret);
 }
