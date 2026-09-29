@@ -1,0 +1,44 @@
+Copyright (c) 1982, 1986, 1989, 1991, 1993
+	The Regents of the University of California.  All rights reserved.
+Copyright (c) 1995-2026 OpenBSD. All rights reserved.  https://www.OpenBSD.org
+
+OpenBSD 8.0 (RAMDISK) #101: Tue Sep 29 04:46:38 MDT 2026
+    deraadt@arm64.openbsd.org:/usr/src/sys/arch/arm64/compile/RAMDISK
+real mem  = 536854528 (511MB)
+avail mem = 480927744 (458MB)
+random: boothowto does not indicate good seed
+mainbus0 at root: OpenBSD vmd arm64
+cpu0 at mainbus0 mpidr 0: Unknown, MIDR 0xdbadc0de
+cpu0: 0KB 64b/line 1-way L1 PIPT I-cache
+cpu0: 0KB 64b/line 1-way L2 cache
+cpu0: TLBIOS+IRANGE,TS+AXFLAG,FHM,DP,SHA3,RDM,Atomic,CRC32,SHA2+SHA512,SHA1,AES+PMULL,I8MM,BF16,SB,FRINTTS,GPI,LRCPC+LDAPUR,FCMA,JSCVT,API+EPAC2+FPAC,DPB+DCCVADP,ECV,SpecSEI,PAN+ATS1E1,LO,HPDS,VH,IDS,AT,CSV3,CSV2,DIT,RAS,AdvSIMD+HP,FP+HP,BT,SSBS+MSR
+agintc0 at mainbus0 shift 4:4 nirq 64 nredist 1: "intc"
+agtimer0 at mainbus0: 24000 kHz
+pluart0 at mainbus0
+pluart0: console
+softraid0 at root
+scsibus0 at softraid0: 256 targets
+root on rd0a swap on rd0b dump on rd0b
+WARNING: CHECK AND RESET THE DATE!
+erase ^?, werase ^W, kill ^U, intr ^C, status ^T
+
+Welcome to the OpenBSD/arm64 8.0 installation program.
+(I)nstall, (U)pgrade, (A)utoinstall or (S)hell? S
+# echo SHELL_''READY
+SHELL_READY
+# pwd && echo PWD_''DONE
+/
+PWD_DONE
+# ls / && echo LS_''DONE
+.profile     dev          install.md   mnt2         upgrade
+autoinstall  etc          install.sub  sbin         usr
+bin          install      mnt          tmp          var
+LS_DONE
+# sysctl kern.ostype kern.osrelease && echo SYSCTL_''DONE
+kern.osrelease=8.0
+SYSCTL_DONE
+# echo ARITH_"$((6 * 7))"
+ARITH_42
+# sleep 1 && echo SLEEP_''DONE
+SLEEP_DONE
+# 
