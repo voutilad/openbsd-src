@@ -76,3 +76,64 @@ No guest instruction decoding/emulation was added to the kernel.
 Temporary trace output and all name-controlled forced-flush modes are
 removed in the follow-up kernel; historical diagnostic drivers in tlb-ab
 require the older diagnostic commits and are retained only as evidence.
+
+## Clean-kernel confirmation
+
+GENERIC.MP#182 boots commit 9d79f356 and reports `EL2/VHE stage-2 (16KB)`.
+All eight kernel regression targets and the vmd device regression passed
+again after reboot, with no diagnostic tracing or extra invalidation code
+remaining in the kernel.
+
+A first clean-kernel boot reached the installer but timed out (60 seconds)
+after echoing the `i` of its initial `i\r` input. It did not print the next
+question. Preserve this as an unresolved intermittent input symptom, not
+as a successful automated run. Evidence: bsd-rd-s2-clean-first-{result,console}.
+
+The next clean-kernel boot, bsd-rd-hwfast-74154, completed the entire harness
+at 01:23:06 UTC on Sep 29 and returned exit status 0 / BSD_RD_BOOT_PASS.
+It accepted all installer answers through the no-disks prompt. This repeat
+allowed up to 180 seconds per prompt, but actually completed at about the
+same overall boot duration as the original successful #180 run. No input
+was retransmitted, no VM pause occurred, and no execution state was changed.
+Evidence: bsd-rd-s2-clean-repeat-{result,console,vmd.log}. Copies are also
+in the Linux workspace's hwfast-work directory.
+
+Commit fe82fcbd extends the toy UART regression beyond its original single
+character. It sends `i\rhostname\rpassword\r` in one write and checks every
+received character in order across repeated RX interrupts and rearming.
+The first run passed, followed by two successful stress repetitions. Stress
+trial 3 timed out before printing any toy-guest output, before input was
+sent. A further run with UART_WAIT_LIMIT=600 (nominal 60 seconds waiting
+for the input-ready marker) also failed: it printed successful SPI, timer,
+repeated-wakeup, and timer-preemption messages, but never printed the UART
+TX completion message. It ended at 01:28:20 UTC after starting at 01:27:06.
+Thus this is not established to be a UART byte-loss issue or merely the
+original short startup timeout. Do NOT describe the stress suite as passing.
+
+Evidence: vmd-s2-burst-regress.log, vmd-s2-burst-{1,2,3}.log, and
+vmd-s2-burst-long.log. All are retained on both hosts. UART_WAIT_LIMIT is an
+optional test-harness bound, not a device workaround. No kernel or vmd
+behavior was changed to hide these failures.
+
+The installer-boot milestone is achieved, but repeated-start/interrupt/input
+reliability remains unfinished. The next investigation should capture the
+toy guest's stopped PC and LR/VMCR/PMR state during the pre-UART-TX stall;
+it is a much smaller case than the ramdisk. The production kernel has no
+diagnostic tracing, and all temporary nested test guests are stopped.
+
+## Manual reproduction inside the outer OpenBSD VM
+
+Run vmd in one terminal:
+
+    doas vmd -d -f /dev/null
+
+In another terminal, launch and attach to the ramdisk (no disks or NICs):
+
+    doas vmctl start -c -m 512M -b /home/dv/bsd.rd.vmm rdtest
+
+For the automated console-input check, with no other vmd instance running:
+
+    doas env BOOT_LIMIT=1500 sh /usr/src/regress/sys/arch/arm64/vmm/tlb-ab/bsd-rd-test.sh
+
+This harness stops its nested VM and vmd when done. The 512MB nested VM is
+inside the existing 6GB QEMU/OpenBSD VM; do not start a second outer QEMU.

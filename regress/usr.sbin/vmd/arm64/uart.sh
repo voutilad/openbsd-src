@@ -83,7 +83,7 @@ cat <&3 >"${console}" 2>&1 &
 consolepid=$!
 
 i=0
-while [ ${i} -lt 100 ]; do
+while [ ${i} -lt "${UART_WAIT_LIMIT:-100}" ]; do
 	grep -q "arm64 vmd waiting for PL011 input" "${console}" && break
 	kill -0 "${consolepid}" 2>/dev/null || fail "console reader exited"
 	i=$((i + 1))
@@ -100,7 +100,7 @@ while [ ${i} -lt 50 ]; do
 	sleep 0.1
 done
 i=0
-while [ ${i} -lt 100 ]; do
+while [ ${i} -lt "${UART_WAIT_LIMIT:-100}" ]; do
 	grep -q "arm64 vmd waiting for PL011 burst" "${console}" && break
 	i=$((i + 1))
 	sleep 0.1
