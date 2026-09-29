@@ -255,12 +255,18 @@ ENTRY(arm64_vmm_enter_vhe)
 	dsb	ishst
 	cmp	x0, #2
 	b.eq	.Lvhe_tlb_s1
+	cmp	x0, #4
+	b.eq	.Lvhe_icache_only
 	cmp	x0, #3
 	b.ne	.Lvhe_tlb_barriers
 	tlbi	vmalls12e1is
 	b	.Lvhe_tlb_barriers
 .Lvhe_tlb_s1:
 	tlbi	vmalle1is
+	b	.Lvhe_tlb_barriers
+.Lvhe_icache_only:
+	/* No translation invalidation: isolate instruction-cache visibility. */
+	ic	ialluis
 .Lvhe_tlb_barriers:
 	dsb	ish
 	isb

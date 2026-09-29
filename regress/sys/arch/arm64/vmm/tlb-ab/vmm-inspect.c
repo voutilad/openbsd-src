@@ -17,6 +17,7 @@ walk(int fd, unsigned int id, const struct vcpu_reg_state *r)
 	struct vm_sharemem_params s;
 	uint64_t table, pte, pa;
 	unsigned int level, shift;
+	uint32_t insn;
 	char *ram;
 
 	memset(&s, 0, sizeof(s));
@@ -63,6 +64,14 @@ walk(int fd, unsigned int id, const struct vcpu_reg_state *r)
 		if ((pte & 3) != 3)
 			break;
 		table = pte & 0xfffffffff000ULL;
+	}
+	if (level == 4) {
+		pa = table + (r->vrs_pc & 0xfff);
+		if (pa >= 0x40000000 && pa <= 0x60000000 - sizeof(insn)) {
+			memcpy(&insn, ram + pa - 0x40000000, sizeof(insn));
+			printf("instruction in RAM at IPA %llx = %08x\n",
+			    (unsigned long long)pa, insn);
+		}
 	}
 }
 

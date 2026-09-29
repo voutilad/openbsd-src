@@ -939,13 +939,15 @@ vm_run(struct vm_run_params *vrp)
 			run->avr_flush_tlb = 1;
 		/*
 		 * Temporary, self-timed experiment; no new ioctl or instruction
-		 * emulation.  Keep mandatory invalidations in bit 0.  Bits 2:1
+		 * emulation.  Keep mandatory invalidations in bit 0.  Bits 3:1
 		 * request an additional EL0-entry operation in vmm_support.S:
-		 * 0 = none, 1 = barriers, 2 = stage 1, 3 = stages 1+2.
+		 * 0 = none, 1 = barriers, 2 = stage 1, 3 = stages 1+2,
+		 * 4 = instruction cache only.
 		 *
 		 * Start six 15-second phases at the first observed EL0 entry:
 		 * baseline, barriers, S1, baseline, S1+S2, baseline.  A VM whose
-		 * name contains "reverse" exchanges S1 and S1+S2.  Changing phases
+		 * name contains "reverse" exchanges S1 and S1+S2.  A name containing
+		 * "icache" replaces the S1 operation with IC IALLUIS. Changing phases
 		 * neither pauses the vCPU nor touches its registers/page tables.
 		 */
 		diag_now = READ_SPECIALREG(cntvct_el0);
@@ -961,6 +963,12 @@ vm_run(struct vm_run_params *vrp)
 		if (strnstr(vm->vm_name, "reverse", sizeof(vm->vm_name)) != NULL &&
 		    diag_mode >= 2)
 			diag_mode = 5 - diag_mode;
+		if (diag_mode == 2 && strnstr(vm->vm_name, "icache",
+		    sizeof(vm->vm_name)) != NULL)
+			diag_mode = 4;
+		/* Ordinary VMs must never acquire a timed forced-invalidation mode. */
+		if (strncmp(vm->vm_name, "bsd-rd-tlb-", 11) != 0)
+			diag_mode = 0;
 		if ((run->avr_pstate & PSR_M_MASK) == PSR_M_EL0t)
 			run->avr_flush_tlb |= diag_mode << 1;
 		WRITE_ONCE(vcpu->vc_curcpu, curcpu());

@@ -4,8 +4,8 @@
 set -eu
 
 vmid=${1:?kernel VM id required}
-order=${2:?forward or reverse required}
-case ${order} in forward|reverse) ;; *) exit 2 ;; esac
+order=${2:?forward, reverse, icache or icache-reverse required}
+case ${order} in forward|reverse|icache|icache-reverse) ;; *) exit 2 ;; esac
 out=$(mktemp -d /home/dv/vmm-tlb-${order}.XXXXXXXX)
 chown dv "${out}"
 bootpid=
@@ -30,7 +30,7 @@ finished=0
 while [ ${i} -lt 90 ] && kill -0 "${bootpid}" 2>/dev/null; do
 	{
 		date -u '+SAMPLE %Y-%m-%dT%H:%M:%SZ'
-		/tmp/vmm-inspect "${vmid}" counters || true
+		/tmp/vmm-inspect "${vmid}" counters 2>>"${out}/reader-errors" || true
 		dmesg | awk -v id="${vmid}" '
 		    /^vmm diag: vm/ { wanted = ($4 == id) }
 		    /^vmm diag:/ && wanted { print }
@@ -57,6 +57,6 @@ fi
 cp /tmp/bsd-rd-hwfast.vmd.log "${out}/vmd-log"
 cleanup
 bootpid=
-printf 'EXPERIMENT_FINISHED phases_completed=%s directory=%s\n' \
+printf 'EXPERIMENT_FINISHED final_phase_samples=%s directory=%s\n' \
     "${finished}" "${out}"
 [ ${finished} -ge 4 ]
