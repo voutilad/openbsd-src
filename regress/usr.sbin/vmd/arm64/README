@@ -42,3 +42,48 @@ The automated form builds the same ELF and manages a private vmd instance:
 
 	cd /usr/src/regress/usr.sbin/vmd/arm64
 	doas make VMD=/usr/src/usr.sbin/vmd/vmd regress
+
+Full disk installation (manual integration test)
+===============================================
+
+The PCI platform can install and boot an ordinary arm64 system using the
+existing virtio block and network drivers.  Use a NEW disposable image:
+
+	vmctl create -s 80G qcow2:/path/to/disk.qcow2
+	doas vmctl start -c -m 1G -L -b /path/to/bsd.rd \
+	    -d qcow2:/path/to/disk.qcow2 arm64-install
+
+Use a matching bsd.rd and signed install sets, and select all the standard
+sets.  The local interface (-L) supplies DHCP but does not provide Internet
+forwarding or DNS service.  Configure external connectivity separately, or
+attach a second FFS disk containing the sets and SHA256.sig under
+/8.0/arm64 with another -d raw:/path/to/sets.img option.  In that example,
+sd0 is the installation target and sd1 is the media; initialize only sd0.
+
+After the installer finishes, export its completed /mnt/bsd to a file in
+the outer VM.  A writable partition on the separate installation-media
+disk can carry this file and /mnt/var/db/kernel.SHA256.  Unmount that
+partition, halt the guest and wait for disk synchronization before stopping
+the VM or mounting its media in the outer system.  Check the exported
+kernel against the recorded checksum, then boot without the media disk:
+
+	doas vmctl start -c -m 1G -L -b /path/to/bsd.installed \
+	    -d qcow2:/path/to/disk.qcow2 arm64-installed
+
+The current loader directly loads an ELF kernel; it does not run firmware
+or a disk boot loader.  The FDT does not yet supply a boot-disk ID, so enter
+sd0a at the root-device prompt and accept the default sd0b swap device.
+Export /bsd again after changing the installed kernel.  Kernel symbols and
+an initial random seed are not yet passed by this direct-boot path; the
+corresponding boot warnings are separate from PCI/disk attachment.  Set the
+guest clock after boot if network time is unavailable.
+
+A successful test must reach the installed system, not just the ramdisk
+shell: check the root mount, disk capacity and DUID, completion of every set,
+the installed /bsd.rd checksum against the signed manifest, and SSH/network
+traffic.  The 2026-09-30 snapshot passed these checks with an 80GB qcow2
+disk, a GENERIC kernel, and host-only virtio networking.  Its 512MB installer
+completed, including kernel relinking, but used guest swap during the long
+relink; the installed-system boot used 1GB.  The outer VM remained at 6GB
+and Linux host swap was unused.  Remember that a sparse 80GB image does not
+reserve 80GB of space on its backing filesystem.
